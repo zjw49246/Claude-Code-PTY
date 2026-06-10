@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PTY 常驻会话方案 — 技术说明</title>
+<style>
+  :root {
+    --bg: #0b0f17; --panel: #131a26; --panel2: #1a2333; --border: #263247;
+    --text: #d8e0ee; --muted: #8a97ad; --accent: #6d8dff; --green: #3fcf8e;
+    --amber: #e8b44c; --red: #e36c6c; --code-bg: #0e1420;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.75 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 30px; margin: 0 0 6px; }
+  h2 { font-size: 22px; margin: 48px 0 14px; padding-bottom: 8px;
+       border-bottom: 1px solid var(--border); color: #fff; }
+  h3 { font-size: 17px; margin: 28px 0 10px; color: var(--accent); }
+  .sub { color: var(--muted); margin-bottom: 28px; }
+  .tag { display: inline-block; padding: 1px 9px; border-radius: 99px;
+         font-size: 12px; margin-right: 6px; border: 1px solid var(--border); }
+  .tag.g { color: var(--green); border-color: var(--green); }
+  .tag.a { color: var(--amber); border-color: var(--amber); }
+  .tag.b { color: var(--accent); border-color: var(--accent); }
+  p { margin: 10px 0; }
+  code { background: var(--code-bg); border: 1px solid var(--border);
+         padding: 1px 6px; border-radius: 4px; font-size: 13px;
+         font-family: "SF Mono", Consolas, monospace; color: #b9cdf5; }
+  pre { background: var(--code-bg); border: 1px solid var(--border);
+        border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+        font-size: 13px; line-height: 1.6; }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel2); color: #fff; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .card { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 10px; padding: 18px 20px; margin: 16px 0; }
+  .card.warn { border-left: 4px solid var(--amber); }
+  .card.good { border-left: 4px solid var(--green); }
+  .card.bad  { border-left: 4px solid var(--red); }
+  .flow { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 12px; padding: 24px; margin: 20px 0; }
+  .flow-row { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap;
+              justify-content: center; margin: 10px 0; }
+  .node { background: var(--panel2); border: 1px solid var(--border);
+          border-radius: 8px; padding: 10px 16px; text-align: center;
+          min-width: 150px; flex: 1; }
+  .node b { color: #fff; display: block; font-size: 14px; }
+  .node span { color: var(--muted); font-size: 12px; }
+  .node.hl { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .node.gr { border-color: var(--green); }
+  .arrow { text-align: center; color: var(--muted); font-size: 13px; margin: 2px 0; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .cols { grid-template-columns: 1fr; } }
+  .kbd { color: var(--green); }
+  ol li, ul li { margin: 6px 0; }
+  .toc { background: var(--panel); border: 1px solid var(--border);
+         border-radius: 10px; padding: 14px 22px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  footer { margin-top: 60px; color: var(--muted); font-size: 13px;
+           border-top: 1px solid var(--border); padding-top: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>PTY 常驻会话方案</h1>
+<p class="sub">
+  <span class="tag b">Claude-Code-PTY</span>
+  <span class="tag g">Claude-Code-Manager</span>
+  <span class="tag a">参考 Teleos</span><br>
+  用常驻交互式 Claude Code 进程替代 <code>claude -p</code> 一次性调用 —— 多轮免冷启动、上下文热、可注入可中断，且与 -p 模式一键互切。
+</p>
+
+<div class="toc">
+  <b>目录</b><br>
+  <a href="#why">1. 为什么替换 claude -p</a> ·
+  <a href="#arch">2. 核心架构</a> ·
+  <a href="#mech">3. 关键机制</a> ·
+  <a href="#ccm">4. 与 CCM 配套使用</a> ·
+  <a href="#verify">5. 验证体系</a> ·
+  <a href="#roadmap">6. 已知边界与路线图</a> ·
+  <a href="#index">7. 代码索引</a>
+</div>
+
+<h2 id="why">1. 为什么替换 claude -p</h2>
+<p>CCM 原本每个回合都执行 <code>claude -p "&lt;prompt&gt;" --output-format stream-json --resume &lt;sid&gt;</code>。模式简单（进程退出 = 回合结束），但代价是：</p>
+<table>
+  <tr><th>问题</th><th>说明</th></tr>
+  <tr><td><b>每轮冷启动</b></td><td>每条 chat 消息、每个 loop 迭代都重新拉起整个 CC 进程</td></tr>
+  <tr><td><b>上下文重放</b></td><td>--resume 每次从 JSONL 重建历史，会话越长越慢</td></tr>
+  <tr><td><b>无法中途干预</b></td><td>只能 SIGINT 杀进程，不能注入消息、不能软中断</td></tr>
+  <tr><td><b>进程内状态丢失</b></td><td>KV cache 等每轮归零</td></tr>
+</table>
+<div class="card good"><b>实测收益</b>：端到端冒烟中，第二轮 chat 在同一进程上 <b>7.8 秒</b>完成（含模型响应时间），无任何冷启动开销。</div>
+
+<h2 id="arch">2. 核心架构：PTY 只当宿主，消息走协议层</h2>
+<p>初版直觉「模拟人类打字 + 解析终端输出」被证伪：逐字符 stdin 会拆裂 UTF-8、换行提前提交、TUI 状态污染；ANSI 输出用光标定位渲染，不可能可靠解析。正确架构是输入输出全走结构化协议：</p>
+
+<div class="flow">
+  <div class="flow-row">
+    <div class="node hl"><b>CCM instance_manager</b><span>launch() 按 use_pty_mode 分流<br>flag 关 → 原 -p 路径零改动</span></div>
+  </div>
+  <div class="arrow">▼ flag 开（claude provider）</div>
+  <div class="flow-row">
+    <div class="node hl"><b>CCMBackend 适配器</b><span>process proxy 模拟 subprocess 接口<br>事件回灌 _process_event</span></div>
+  </div>
+  <div class="arrow">▼</div>
+  <div class="flow-row">
+    <div class="node"><b>SessionPool</b><span>LRU ≤20 · 热复用 · drain_idle</span></div>
+  </div>
+  <div class="arrow">▼ 每任务一个 Session（常驻 CC 进程）</div>
+  <div class="flow-row">
+    <div class="node gr"><b>输入：Channel 注入</b><span>BridgeHub → channel_server(MCP)<br>→ notification 唤起新 turn<br>fallback: bracketed-paste stdin</span></div>
+    <div class="node"><b>宿主：PTY</b><span>保活 · 启动应答<br>Esc 中断 · 活动信号</span></div>
+    <div class="node gr"><b>输出：JSONL 轮询</b><span>~/.claude/projects/&lt;hash&gt;/&lt;sid&gt;.jsonl<br>normalize → StreamParser 对齐事件</span></div>
+  </div>
+  <div class="arrow">▼ 回合结束 = system/turn_duration 哨兵 → proxy.complete(0) → dispatcher 无感知</div>
+</div>
+
+<h2 id="mech">3. 关键机制</h2>
+
+<h3>3.1 启动对话框：双保险</h3>
+<div class="cols">
+  <div class="card good">
+    <b>主：spawn 前预写 ~/.claude.json</b>
+    <pre><code>"projects": { "&lt;cwd&gt;": {
+  "hasTrustDialogAccepted": true,
+  "hasClaudeMdExternalIncludesApproved": true,
+  "enabledMcpjsonServers": ["pty-bridge"]
+}}</code></pre>
+    <p>原子写（tmp+rename），trust 框从根上不出现。</p>
+  </div>
+  <div class="card warn">
+    <b>兜底：drain loop 通用自动应答</b>
+    <p>CC 用光标定位排版，可见空格非真空格 → <b>剥 ANSI + 折叠全部空白</b>后匹配统一尾缀 <code>Entertoconfirm</code>，命中写 <span class="kbd">\r</span>。600ms 冷却后主动 re-check（防连续对话框漏检），20s 窗口防运行期误判。</p>
+    <p style="color:var(--muted);font-size:13px">教训：枚举具体文案漏掉了 dev-channels 警告框，曾导致 channel 路径整体失效。</p>
+  </div>
+</div>
+
+<h3>3.2 输入：Channel 注入（主）+ stdin（fallback）</h3>
+<pre><code>send_prompt(text)
+  ① bridge.inject(sid, text)   # HTTP → channel_server → MCP notification（重试 5×1s）
+  ② 全部失败 → PTY stdin        # \x1b[200~ + text + \x1b[201~ + \r（bracketed paste）</code></pre>
+<div class="card good"><b>承重墙（spike 验证）</b>：CC idle 时收到 channel notification 会<b>自动开启新 turn</b>。注入消息以 <code>&lt;channel source="pty-bridge"&gt;</code> 进入上下文，完全绕开 TUI 输入层——prompt 永不触碰快捷键/斜杠补全/粘贴处理。</div>
+
+<h3>3.3 输出：JSONL 轮询 + 事件归一化</h3>
+<p>路径规则（实测）：<code>~/.claude/projects/&lt;re.sub(r'[^A-Za-z0-9]','-',cwd)&gt;/&lt;sid&gt;.jsonl</code>，所有非字母数字 → <code>-</code>。300ms 增量轮询，行缓冲处理 partial write，<code>normalize()</code> 输出与 CCM StreamParser 一致的事件（message / thinking / tool_use / tool_result + usage）。</p>
+
+<h3>3.4 回合结束：turn_duration 哨兵</h3>
+<pre><code>{"type":"system","subtype":"turn_duration","durationMs":3348}   ← 每 turn 恰一条，在所有消息之后</code></pre>
+<div class="card bad"><b>为什么不用 stop_reason=end_turn</b>：同一 turn 的 thinking 块和 text 块各占一行 JSONL、都带 end_turn，按它判断会提前截断丢失尾部消息。注意交互模式<b>没有 result 事件</b>（那是 -p 专属）。</div>
+
+<h3>3.5 会话生命周期</h3>
+<table>
+  <tr><th>场景</th><th>行为</th></tr>
+  <tr><td>同 session_id 再次 launch</td><td>池中活会话<b>热复用</b>：直接注入新 prompt</td></tr>
+  <tr><td>会话不在池中、磁盘有记录</td><td><b>冷恢复</b>：<code>--resume &lt;sid&gt;</code> 拉起（用 --session-id 会冲突）</td></tr>
+  <tr><td>进程崩溃</td><td>指数退避 --resume 自愈（≤3 次）</td></tr>
+  <tr><td>号池换号</td><td><code>migrate_session</code>：JSONL 硬链接到新 CLAUDE_CONFIG_DIR + --resume</td></tr>
+  <tr><td>池满</td><td>LRU 驱逐 idle 会话；mid-turn 永不驱逐</td></tr>
+  <tr><td>关闭 PTY 模式</td><td><code>drain_idle</code>：idle 全回收，mid-turn 跑完为止</td></tr>
+</table>
+
+<h2 id="ccm">4. 与 CCM 配套使用</h2>
+
+<h3>4.1 一个 flag、一处分流</h3>
+<pre><code># instance_manager.launch() 开头
+if provider == "claude" and self.pty_mode_enabled:
+    return await self._launch_pty(...)   # → CCMBackend.launch_for_ccm
+# 否则走原 claude -p 路径（零改动）</code></pre>
+<table>
+  <tr><th>CCM 期望（-p 语义）</th><th>PTY 模式实现</th></tr>
+  <tr><td>process.wait() / returncode</td><td>_PTYProcessProxy：turn_duration → complete(0)</td></tr>
+  <tr><td>进程退出 = 回合结束</td><td>消费完一个 turn 即「退出」，<b>底层进程保活给下轮</b></td></tr>
+  <tr><td>stream-json → _process_event</td><td>PTYEvent.to_dict() 与 StreamParser 结构一致，DB/WebSocket 复用</td></tr>
+  <tr><td>SIGINT 停止</td><td>stop() 分流：Esc 软中断 + 会话回收</td></tr>
+  <tr><td>dispatcher 超时 kill</td><td>proxy.kill() 真正回收会话并返回 -9</td></tr>
+  <tr><td>--mcp-config（$ skills）/ CLAUDE_CONFIG_DIR（号池）</td><td>透传 PTYConfig</td></tr>
+</table>
+
+<h3>4.2 任务类型映射</h3>
+<table>
+  <tr><th>场景</th><th>PTY 模式</th></tr>
+  <tr><td>主任务执行</td><td>新建常驻会话 + channel 注入</td></tr>
+  <tr><td><b>chat 多轮</b></td><td>同一活会话直接注入——<b>收益最大</b></td></tr>
+  <tr><td>loop / goal 轮次</td><td>同一会话注入下一轮</td></tr>
+  <tr><td>goal 评估器 / monitor 子 agent</td><td><b>保留 -p</b>（一次性评估/独立机制，本就该用 -p）</td></tr>
+  <tr><td>codex provider</td><td>不受影响</td></tr>
+</table>
+
+<h3>4.3 前端开关</h3>
+<div class="card">
+  <p>导航栏右侧 <span class="tag g">PTY</span> toggle → <code>PUT /api/settings/runtime</code>，<b>无需重启后端</b>。</p>
+  <ul>
+    <li><b>粒度 = 每次 launch</b>（每条消息/每轮迭代都是一次 launch），切换立即影响下一次启动</li>
+    <li><b>运行中的 turn 永不被切换</b>，跑完为止，事件照常入库</li>
+    <li>关闭时自动回收 idle PTY 进程（drain_idle）</li>
+    <li>状态持久化 GlobalSettings 表，重启恢复；env USE_PTY_MODE 仅为初始缺省</li>
+    <li>上下文无缝：两种模式共享 session_id/JSONL，切换后 --resume 接上历史</li>
+  </ul>
+</div>
+
+<h3>4.4 部署</h3>
+<pre><code># CCM venv 内安装 claude_pty（提供 claude-pty-channel 入口，需在 PATH）
+pip install -e /path/to/Claude-Code-PTY
+
+# 启动（之后前端可随时切换）
+AUTH_TOKEN=... USE_PTY_MODE=true uvicorn backend.main:app --port 8003</code></pre>
+
+<h2 id="verify">5. 验证体系</h2>
+<table>
+  <tr><th>层级</th><th>内容</th></tr>
+  <tr><td>Phase 0 spikes</td><td>channel 注入唤起新 turn ✅ · 交互 JSONL 形态 · 路径规则实测 · trust 预写 ✅</td></tr>
+  <tr><td>PTY 单测 ×96</td><td>路径/哨兵/预写/匹配/fallback/resume/drain_idle</td></tr>
+  <tr><td>PTY 集成 ×6 + 全功能 ×7（真实 CC）</td><td>含 channels 端到端、多轮记忆、CCM 事件格式兼容</td></tr>
+  <tr><td>CCM 单测 ×67</td><td>launch/stop 分流、运行时开关、API、drain 触发</td></tr>
+  <tr><td>端到端冒烟</td><td><code>scripts/pty_smoke.py</code>：事件入库/广播/exit 0/<b>热复用 7.8s</b></td></tr>
+</table>
+
+<h2 id="roadmap">6. 已知边界与路线图（Phase 3）</h2>
+<table>
+  <tr><th>项</th><th>现状</th><th>计划</th></tr>
+  <tr><td><b>号池撞限换号</b> ⚠️ 最高优先</td><td>基础设施就绪但<b>检测缺失</b>：交互模式撞限不退进程 → 表现为超时而非 rotation</td><td>扫 PTY 输出 usage-limit 标志 → migrate_and_relaunch()</td></tr>
+  <tr><td>cost 统计</td><td>无 result 事件，total_cost_usd 不更新</td><td>从 assistant usage 累加</td></tr>
+  <tr><td>任务级完成信号</td><td>仅回合级（turn_duration）</td><td>ccm_done(summary) MCP tool</td></tr>
+  <tr><td>崩溃分类</td><td>统一 --resume 重试</td><td>auth 过期/binary 缺失不重试；stderr 环形缓冲诊断</td></tr>
+  <tr><td>typing 信号</td><td>_last_output 已记录</td><td>暴露给前端 typing indicator</td></tr>
+</table>
+
+<h2 id="index">7. 代码索引</h2>
+<div class="cols">
+  <div class="card">
+    <b>Claude-Code-PTY · src/claude_pty/</b>
+    <table>
+      <tr><td><code>pty_process.py</code></td><td>PTY 托管/预写/自动应答/stdin</td></tr>
+      <tr><td><code>session.py</code></td><td>send_prompt 通路/auto-resume/migrate</td></tr>
+      <tr><td><code>jsonl_reader.py</code></td><td>轮询/normalize/哨兵</td></tr>
+      <tr><td><code>pool.py</code></td><td>LRU/drain_idle</td></tr>
+      <tr><td><code>bridge.py</code> + <code>channel_server.py</code></td><td>注入链路</td></tr>
+      <tr><td><code>adapters/ccm.py</code></td><td>CCMBackend + proxy</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <b>Claude-Code-Manager · dev 分支</b>
+    <table>
+      <tr><td><code>backend/config.py</code></td><td>use_pty_mode</td></tr>
+      <tr><td><code>services/instance_manager.py</code></td><td>分流/set_pty_mode/drain</td></tr>
+      <tr><td><code>api/settings.py</code></td><td>/api/settings/runtime</td></tr>
+      <tr><td><code>Layout/Header.tsx</code></td><td>导航栏 toggle</td></tr>
+      <tr><td><code>scripts/pty_smoke.py</code></td><td>端到端冒烟</td></tr>
+    </table>
+    <p style="font-size:13px;color:var(--muted)">关键 commits：PTY 1f889cc → 0c64014 → a02289e → 0b59e90；CCM-dev 1b6d45b → 55374fe → e7b23ec</p>
+  </div>
+</div>
+
+<footer>文档版本 2026-06-10 · 对应 Claude Code 2.1.168 · 设计参考 Teleos（zjw49246/Agent2Agent）</footer>
+</div>
+</body>
+</html>
