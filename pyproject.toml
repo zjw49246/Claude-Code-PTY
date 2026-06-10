@@ -1,0 +1,23 @@
+[project]
+name = "claude-pty"
+version = "0.1.0"
+description = "PTY framework for programmatically driving Claude Code CLI in interactive mode"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+claude-pty-channel = "claude_pty.channel_server:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"

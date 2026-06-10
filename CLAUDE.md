@@ -4,7 +4,7 @@
 
 ## Git 信息
 
-- Remote: 无（纯本地项目）
+- Remote: origin → https://github.com/zjw49246/Claude-Code-PTY.git
 - 默认分支: main
 
 ## 任务生命周期
