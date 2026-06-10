@@ -5,6 +5,7 @@ from .pool import SessionPool
 from .pty_process import PTYProcess
 from .jsonl_reader import JsonlReader
 from .bridge import BridgeHub
+from .adapters.base import BasePTYBackend
 from .exceptions import (
     ClaudePTYError,
     PTYSpawnError,
@@ -22,6 +23,7 @@ __all__ = [
     "PTYProcess",
     "JsonlReader",
     "BridgeHub",
+    "BasePTYBackend",
     "ClaudePTYError",
     "PTYSpawnError",
     "PTYDeadError",

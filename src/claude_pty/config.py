@@ -29,3 +29,7 @@ class PTYConfig:
     restart_backoff_base: float = 2.0
 
     config_dir: str | None = None
+
+    env_overrides: dict[str, str] | None = None
+    disallowed_tools: list[str] | None = None
+    mcp_config_path: str | None = None

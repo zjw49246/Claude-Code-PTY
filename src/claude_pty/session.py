@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import os
 import time
 from typing import AsyncIterator, Callable
 
@@ -123,7 +125,9 @@ class Session:
         timeout = timeout or self.config.response_timeout
         loop = asyncio.get_running_loop()
 
+        logger.info("Session %s: sending prompt (%d chars) via executor...", self.session_id, len(text))
         await loop.run_in_executor(None, self._process.send_prompt, text)
+        logger.info("Session %s: prompt sent successfully", self.session_id)
         self._last_activity = time.monotonic()
 
         deadline = time.monotonic() + timeout
@@ -230,6 +234,27 @@ class Session:
         return await loop.run_in_executor(
             None, self._bridge.inject, self.session_id, content, meta
         )
+
+    async def migrate_session(self, new_config_dir: str) -> None:
+        """Migrate session JSONL to a new config_dir via hardlink, then restart."""
+        old_jsonl = self.jsonl_path
+        if not old_jsonl or not os.path.exists(old_jsonl):
+            raise SessionError(f"No JSONL file to migrate: {old_jsonl}")
+
+        old_config = self.config.config_dir or os.path.expanduser("~/.claude")
+        rel = os.path.relpath(old_jsonl, old_config)
+        new_jsonl = os.path.join(new_config_dir, rel)
+
+        os.makedirs(os.path.dirname(new_jsonl), exist_ok=True)
+        if not os.path.exists(new_jsonl):
+            os.link(old_jsonl, new_jsonl)
+
+        saved_session_id = self._session_id
+        await self.stop()
+        self.config = dataclasses.replace(self.config, config_dir=new_config_dir)
+        self._session_id = saved_session_id
+        self._restart_count += 1
+        await self.start()
 
     async def _auto_resume(self) -> None:
         if self._restart_count >= self.config.max_restart_attempts:

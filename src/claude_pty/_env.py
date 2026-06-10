@@ -26,6 +26,11 @@ def build_clean_env(config: PTYConfig) -> dict[str, str]:
     env.update(_FORCE_SET)
 
     if config.config_dir:
-        env["CLAUDE_CONFIG_DIR"] = config.config_dir
+        default_dir = os.path.expanduser("~/.claude")
+        if os.path.realpath(config.config_dir) != os.path.realpath(default_dir):
+            env["CLAUDE_CONFIG_DIR"] = config.config_dir
+
+    if config.env_overrides:
+        env.update(config.env_overrides)
 
     return env

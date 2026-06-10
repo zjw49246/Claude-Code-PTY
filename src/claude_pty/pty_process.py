@@ -15,9 +15,13 @@ import time
 import uuid
 from typing import Callable
 
+import logging
+
 from .config import PTYConfig
 from ._env import build_clean_env
 from .exceptions import PTYSpawnError, PTYDeadError
+
+logger = logging.getLogger(__name__)
 
 
 class PTYProcess:
@@ -51,7 +55,7 @@ class PTYProcess:
 
     @property
     def jsonl_path(self) -> str:
-        project_hash = self.cwd.replace("/", "-")
+        project_hash = self.cwd.replace("/", "-").replace("_", "-")
         config_base = self.config.config_dir or os.path.expanduser("~/.claude")
         return os.path.join(
             config_base, "projects", project_hash, f"{self.session_id}.jsonl"
@@ -165,6 +169,10 @@ class PTYProcess:
             cmd.extend(["--model", self.config.default_model])
         if self.config.default_effort:
             cmd.extend(["--effort", self.config.default_effort])
+        if self.config.disallowed_tools:
+            cmd.extend(["--disallowedTools", ",".join(self.config.disallowed_tools)])
+        if self.config.mcp_config_path:
+            cmd.extend(["--mcp-config", self.config.mcp_config_path])
         return cmd
 
     def _drain_loop(self) -> None:
@@ -182,11 +190,18 @@ class PTYProcess:
                     if not data:
                         self._child_dead.set()
                         break
-                    # During startup, watch for workspace trust dialog
+                    logger.debug("drain[%s]: %d bytes", self.session_id[:8], len(data))
                     if not trust_handled and time.monotonic() < startup_deadline:
                         startup_buf += data
                         lower = startup_buf.lower()
-                        if b"trust" in lower or b"safety" in lower:
+                        _startup_triggers = (
+                            b"trust", b"safety",
+                            b"choose the text style",
+                            b"get started",
+                            b"looks best with your terminal",
+                        )
+                        if any(t in lower for t in _startup_triggers):
+                            logger.info("drain[%s]: startup dialog detected, sending \\r", self.session_id[:8])
                             os.write(self.master_fd, b"\r")
                             trust_handled = True
                             startup_buf = b""
@@ -204,6 +219,7 @@ class PTYProcess:
         if not self.is_alive:
             raise PTYDeadError(f"Process {self.session_id} is not alive")
 
+        logger.info("send_prompt[%s]: %d chars, master_fd=%s", self.session_id[:8], len(text), self.master_fd)
         for ch in text:
             os.write(self.master_fd, ch.encode("utf-8"))
             delay = random.gauss(
