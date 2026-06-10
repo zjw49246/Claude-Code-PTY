@@ -211,6 +211,9 @@ class CCMBackend(BasePTYBackend):
             except ImportError:
                 pass
 
+        logger.info("launch_for_ccm: instance=%s mcp_config=%s skills=%s resume=%s",
+                    instance_id, mcp_config_path, enabled_skills, resume_session_id)
+
         if config_dir:
             self._im._config_dirs[instance_id] = config_dir
 
