@@ -291,6 +291,11 @@ class CCMBackend(BasePTYBackend):
             mcp_config_path=mcp_config_path,
         )
 
+        # Surface the real PTY pid on the proxy (Instance.pid bookkeeping)
+        sess = self._sessions.get(instance_id)
+        if sess is not None and sess._process is not None:
+            proxy.pid = sess._process.pid or 0
+
         consumer = self._consumers.get(instance_id)
         if consumer:
             self._im._tasks[instance_id] = consumer
