@@ -102,6 +102,7 @@ class BasePTYBackend:
     async def stop(self, key: Any) -> None:
         session = self._sessions.get(key)
         if session:
+            sid = session.session_id
             await session.send_interrupt()
             consumer = self._consumers.get(key)
             if consumer and not consumer.done():
@@ -112,6 +113,10 @@ class BasePTYBackend:
             await session.stop()
             self._sessions.pop(key, None)
             self._consumers.pop(key, None)
+            if sid:
+                # Remove the dead session from the pool as well, otherwise a
+                # later launch finds a corpse and takes the cold-resume path.
+                await self._pool.remove(sid)
 
     async def migrate_and_relaunch(
         self, key: Any, new_config_dir: str, resume_session_id: str

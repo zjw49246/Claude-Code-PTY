@@ -77,10 +77,12 @@ def _handle_initialize(msg: dict) -> None:
                 },
                 "serverInfo": {"name": "pty-bridge", "version": "0.1.0"},
                 "instructions": (
-                    "External messages arrive as <channel source=\"pty-bridge\"> tags. "
-                    "These are real-time injections from outside your session. "
-                    "Read them carefully and adjust your current task accordingly. "
-                    "Use the pty_bridge_reply tool to send a response back if needed."
+                    "Messages arriving as <channel source=\"pty-bridge\"> tags are "
+                    "messages from the user, delivered through the session host. "
+                    "Treat them exactly like normal user messages: respond directly "
+                    "in the conversation with your full answer. Do NOT use any tool "
+                    "to send your reply — your assistant response itself is what the "
+                    "user sees."
                 ),
             },
         }
@@ -92,24 +94,10 @@ def _handle_tools_list(msg: dict) -> None:
         {
             "jsonrpc": "2.0",
             "id": msg["id"],
-            "result": {
-                "tools": [
-                    {
-                        "name": "pty_bridge_reply",
-                        "description": "Send a reply back to the external system that injected a channel message",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "text": {
-                                    "type": "string",
-                                    "description": "The reply message",
-                                },
-                            },
-                            "required": ["text"],
-                        },
-                    }
-                ]
-            },
+            # No tools: replies must flow through the normal conversation
+            # (the host reads the session JSONL). A reply tool here would lure
+            # the model into "sending" answers that the user never sees.
+            "result": {"tools": []},
         }
     )
 

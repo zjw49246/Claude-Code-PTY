@@ -269,3 +269,60 @@ class TestDrainIdle:
         assert idle.stopped is True
         assert busy.stopped is False
         assert list(pool._sessions) == ["busy"]
+
+
+class TestReplyToolRemoved:
+    """The pty_bridge_reply tool lured the model into 'sending' answers the
+    user never saw (replies must flow through the conversation/JSONL)."""
+
+    def test_tools_list_empty(self, monkeypatch, capsys):
+        from claude_pty import channel_server
+        import io, json as _json
+
+        out = []
+        monkeypatch.setattr(channel_server, "_write_message", out.append)
+        channel_server._handle_tools_list({"jsonrpc": "2.0", "id": 1})
+        assert out[0]["result"]["tools"] == []
+
+    def test_instructions_say_reply_in_conversation(self, monkeypatch):
+        from claude_pty import channel_server
+
+        out = []
+        monkeypatch.setattr(channel_server, "_write_message", out.append)
+        channel_server._handle_initialize({"jsonrpc": "2.0", "id": 1})
+        instructions = out[0]["result"]["instructions"]
+        assert "Do NOT use any tool" in instructions
+        assert "pty_bridge_reply" not in instructions
+
+
+class TestNoSpawnTimeStdinSend:
+    async def test_start_does_not_send_prompt_at_spawn(self, monkeypatch):
+        """Cold resume must NOT write the prompt at spawn (TUI not ready,
+        write gets swallowed -> turn never starts)."""
+        from claude_pty.session import Session
+
+        sent = []
+
+        class FakeProc:
+            session_id = "sid-1"
+            pid = 1
+            jsonl_path = "/tmp/nonexistent.jsonl"
+            channels_enabled = False
+
+            def __init__(self, **kw):
+                pass
+
+            def spawn(self, resume_id=None):
+                pass
+
+            def send_prompt(self, text):
+                sent.append(text)
+
+        monkeypatch.setattr("claude_pty.session.PTYProcess", lambda **kw: FakeProc())
+        from claude_pty.config import PTYConfig
+
+        s = Session(cwd="/w", session_id="sid-1",
+                    config=PTYConfig(startup_wait=0.01), resume_existing=True)
+        s._restart_count = 1  # force resume path
+        await s.start(initial_prompt="hello")
+        assert sent == []  # nothing written at spawn time

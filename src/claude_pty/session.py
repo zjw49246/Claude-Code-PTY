@@ -90,12 +90,12 @@ class Session:
 
         await loop.run_in_executor(None, self._process.spawn, resume_id)
 
-        # For resume: send prompt immediately to avoid Claude Code's 3s stdin timeout
-        if resume_id and initial_prompt:
-            self._pending_prompt = initial_prompt
-            await loop.run_in_executor(None, self._process.send_prompt, initial_prompt)
-        else:
-            self._pending_prompt = None
+        # NOTE: prompts are never written at spawn time. The TUI is not ready
+        # yet and a stdin write here gets silently swallowed (observed in
+        # production: cold-resumed turns never started, consumer hung until
+        # timeout). Delivery happens in send_prompt via channel injection
+        # (with retries) after startup_wait.
+        self._pending_prompt = None
 
         self._session_id = self._process.session_id
         self._reader = JsonlReader(self._process.jsonl_path)

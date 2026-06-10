@@ -94,12 +94,17 @@ class CCMBackend(BasePTYBackend):
             consumer.cancel()
         session = self._sessions.pop(instance_id, None)
         if session:
+            sid = session.session_id
             try:
                 await session.stop()
             except Exception:
                 logger.exception(
                     "Failed to stop PTY session for instance %s", instance_id
                 )
+            if sid:
+                # Dead sessions must not linger in the pool — a later launch
+                # would find them, fail aliveness, and cold-resume confusingly.
+                await self._pool.remove(sid)
 
     async def shutdown(self) -> None:
         await super().shutdown()
@@ -253,15 +258,24 @@ class CCMBackend(BasePTYBackend):
         if config_dir:
             self._im._config_dirs[instance_id] = config_dir
 
-        # Stop existing session before resume to avoid dual-process conflict
+        # Stop a stale session before resume — but never a live session that
+        # IS the resume target (the pool will hot-reuse it; killing it here
+        # would orphan the in-flight turn and force a cold resume).
         old_session = self._sessions.get(instance_id)
-        if old_session:
-            logger.info("Stopping existing PTY session for instance %s before resume", instance_id)
+        if old_session and not (
+            old_session.is_alive
+            and resume_session_id
+            and old_session.session_id == resume_session_id
+        ):
+            logger.info("Stopping stale PTY session for instance %s before launch", instance_id)
+            old_sid = old_session.session_id
             try:
                 await old_session.stop()
             except Exception:
                 logger.exception("Failed to stop old session for instance %s", instance_id)
             self._sessions.pop(instance_id, None)
+            if old_sid:
+                await self._pool.remove(old_sid)
             old_consumer = self._consumers.pop(instance_id, None)
             if old_consumer and not old_consumer.done():
                 old_consumer.cancel()
