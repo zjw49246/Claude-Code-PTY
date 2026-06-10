@@ -138,6 +138,46 @@ class Session:
             async for event in self._send_prompt_inner(text, timeout):
                 yield event
 
+    # Channel server boots with CC's MCP startup; retry injection briefly
+    # before falling back to PTY stdin.
+    _INJECT_ATTEMPTS = 5
+    _INJECT_RETRY_INTERVAL = 1.0
+
+    async def _deliver_prompt(self, text: str) -> None:
+        """Deliver a prompt to CC: channel injection first, stdin fallback.
+
+        Channel injection (an MCP notification) is the preferred path — it
+        bypasses the TUI input layer entirely, so prompt content can never
+        interact with keybindings, slash-command completion, or paste
+        handling. Verified to wake an idle session into a new turn.
+        """
+        loop = asyncio.get_running_loop()
+
+        if self._bridge and self._channel_inject_port:
+            for attempt in range(1, self._INJECT_ATTEMPTS + 1):
+                ok = await loop.run_in_executor(
+                    None, self._bridge.inject, self.session_id, text, None
+                )
+                if ok:
+                    logger.info(
+                        "Session %s: prompt delivered via channel (%d chars)",
+                        self.session_id, len(text),
+                    )
+                    return
+                if attempt < self._INJECT_ATTEMPTS:
+                    await asyncio.sleep(self._INJECT_RETRY_INTERVAL)
+            logger.warning(
+                "Session %s: channel inject failed %d times, "
+                "falling back to PTY stdin",
+                self.session_id, self._INJECT_ATTEMPTS,
+            )
+
+        logger.info(
+            "Session %s: sending prompt via PTY stdin (%d chars)",
+            self.session_id, len(text),
+        )
+        await loop.run_in_executor(None, self._process.send_prompt, text)
+
     async def _send_prompt_inner(
         self,
         text: str,
@@ -158,9 +198,7 @@ class Session:
             self._pending_prompt = None
         else:
             self._pending_prompt = None
-            logger.info("Session %s: sending prompt (%d chars) via executor...", self.session_id, len(text))
-            await loop.run_in_executor(None, self._process.send_prompt, text)
-            logger.info("Session %s: prompt sent successfully", self.session_id)
+            await self._deliver_prompt(text)
         self._last_activity = time.monotonic()
 
         deadline = time.monotonic() + timeout

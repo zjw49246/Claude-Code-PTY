@@ -10,7 +10,6 @@ class TestPTYConfig:
         assert c.dangerously_skip_permissions is True
         assert c.terminal_rows == 50
         assert c.terminal_cols == 200
-        assert c.char_send_delay_mean == 0.05
         assert c.drain_interval == 0.05
         assert c.startup_wait == 8.0
         assert c.post_response_wait == 3.0

@@ -10,10 +10,6 @@ class PTYConfig:
 
     terminal_rows: int = 50
     terminal_cols: int = 200
-    char_send_delay_mean: float = 0.05
-    char_send_delay_stddev: float = 0.02
-    char_send_delay_min: float = 0.01
-    char_send_delay_max: float = 0.15
     drain_interval: float = 0.05
     drain_read_size: int = 65536
 

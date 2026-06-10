@@ -137,3 +137,60 @@ class TestEnterToConfirmMatching:
     def test_normal_output_no_match(self):
         chunk = b"I ran the tests and they pass. Press any key."
         assert "Entertoconfirm" not in _collapse_for_prompt_match(chunk)
+
+
+class TestDeliverPrompt:
+    """Channel injection preferred, PTY stdin fallback."""
+
+    def _make_session(self, bridge, inject_port):
+        from claude_pty.session import Session
+
+        session = Session(
+            cwd="/w", bridge=bridge, channel_inject_port=inject_port
+        )
+        session._session_id = "sid-1"
+
+        class FakeProc:
+            session_id = "sid-1"
+            sent: list = []
+
+            def send_prompt(self, text):
+                FakeProc.sent.append(text)
+
+        FakeProc.sent = []
+        session._process = FakeProc()
+        return session, session._process
+
+    async def test_channel_injection_used_when_available(self):
+        class FakeBridge:
+            calls = []
+
+            def inject(self, sid, content, meta=None):
+                FakeBridge.calls.append((sid, content))
+                return True
+
+        FakeBridge.calls = []
+        session, proc = self._make_session(FakeBridge(), 19999)
+        await session._deliver_prompt("hello")
+        assert FakeBridge.calls == [("sid-1", "hello")]
+        assert proc.sent == []  # stdin not touched
+
+    async def test_falls_back_to_stdin_after_retries(self):
+        class FailingBridge:
+            calls = 0
+
+            def inject(self, sid, content, meta=None):
+                FailingBridge.calls += 1
+                return False
+
+        FailingBridge.calls = 0
+        session, proc = self._make_session(FailingBridge(), 19999)
+        session._INJECT_RETRY_INTERVAL = 0.01
+        await session._deliver_prompt("hello")
+        assert FailingBridge.calls == session._INJECT_ATTEMPTS
+        assert proc.sent == ["hello"]
+
+    async def test_stdin_direct_without_channels(self):
+        session, proc = self._make_session(None, None)
+        await session._deliver_prompt("hi")
+        assert proc.sent == ["hi"]
