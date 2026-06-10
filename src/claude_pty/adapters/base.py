@@ -60,7 +60,9 @@ class BasePTYBackend:
             session_id=sid or "",
             cwd=cwd,
             config_override=config,
-            initial_prompt=prompt if sid else None,
+            channels=self._pool.bridge is not None,
+            initial_prompt=prompt if resume_session_id else None,
+            resume=bool(resume_session_id),
         )
         self._sessions[key] = session
 

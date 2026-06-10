@@ -34,6 +34,7 @@ class Session:
         config: PTYConfig | None = None,
         bridge: BridgeHub | None = None,
         channel_inject_port: int | None = None,
+        resume_existing: bool = False,
     ):
         self.config = config or PTYConfig()
         self._process: PTYProcess | None = None
@@ -46,6 +47,9 @@ class Session:
         self._send_lock = asyncio.Lock()
         self._bridge = bridge
         self._channel_inject_port = channel_inject_port
+        # True when session_id refers to an existing CC session on disk:
+        # spawn with --resume instead of --session-id (which would collide).
+        self._resume_existing = resume_existing
         self._pending_prompt: str | None = None
 
     @property
@@ -69,7 +73,11 @@ class Session:
     async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
 
-        resume_id = self._session_id if self._restart_count > 0 else None
+        resume_id = (
+            self._session_id
+            if (self._restart_count > 0 or (self._resume_existing and self._session_id))
+            else None
+        )
 
         self._process = PTYProcess(
             cwd=self._cwd,

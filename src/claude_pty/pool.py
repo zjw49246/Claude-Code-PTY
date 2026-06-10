@@ -34,6 +34,7 @@ class SessionPool:
         config_override: PTYConfig | None = None,
         channels: bool = False,
         initial_prompt: str | None = None,
+        resume: bool = False,
     ) -> Session:
         async with self._lock:
             self._access_order[session_id] = time.monotonic()
@@ -61,10 +62,11 @@ class SessionPool:
                 bridge = self.bridge
             session = Session(
                 cwd=cwd,
-                session_id=session_id,
+                session_id=session_id or None,
                 config=config,
                 bridge=bridge,
                 channel_inject_port=inject_port,
+                resume_existing=resume,
             )
             await session.start(initial_prompt=initial_prompt)
             self._sessions[session_id] = session

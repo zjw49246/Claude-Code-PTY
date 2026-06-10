@@ -194,3 +194,47 @@ class TestDeliverPrompt:
         session, proc = self._make_session(None, None)
         await session._deliver_prompt("hi")
         assert proc.sent == ["hi"]
+
+
+class TestResumeExisting:
+    """A session created with a pre-existing session_id must spawn with
+    --resume, not --session-id (which would collide with the on-disk session)."""
+
+    def test_session_resume_existing_uses_resume_flag(self):
+        from claude_pty.session import Session
+
+        s = Session(cwd="/w", session_id="existing-id", resume_existing=True)
+        assert s._resume_existing is True
+
+    async def test_pool_passes_resume(self, monkeypatch):
+        from claude_pty.pool import SessionPool
+        from claude_pty import session as session_mod
+
+        captured = {}
+
+        class FakeSession:
+            def __init__(self, **kw):
+                captured.update(kw)
+                self.session_id = kw.get("session_id")
+                self.is_alive = True
+
+            async def start(self, initial_prompt=None):
+                captured["initial_prompt"] = initial_prompt
+
+        monkeypatch.setattr("claude_pty.pool.Session", FakeSession)
+        pool = SessionPool()
+        await pool.get_or_create(
+            session_id="sid-x", cwd="/w", resume=True, initial_prompt="go"
+        )
+        assert captured["resume_existing"] is True
+        assert captured["initial_prompt"] == "go"
+
+    def test_start_resume_command(self):
+        """Session.start with resume_existing must pass resume_id to spawn."""
+        from claude_pty.pty_process import PTYProcess
+
+        proc = PTYProcess(cwd="/w", session_id="abc")
+        cmd = proc._build_command("abc")
+        assert "--resume" in cmd and "abc" in cmd
+        cmd2 = proc._build_command(None)
+        assert "--session-id" in cmd2 and "--resume" not in cmd2

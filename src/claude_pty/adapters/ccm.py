@@ -26,14 +26,16 @@ logger = logging.getLogger(__name__)
 class _PTYProcessProxy:
     """Mimics asyncio.subprocess.Process for dispatcher compatibility.
 
-    The dispatcher calls process.wait() and reads process.returncode.
-    This proxy bridges PTY's consumer task into that interface.
+    The dispatcher calls process.wait() and reads process.returncode; on task
+    timeout it calls kill() and awaits wait() again. kill()/terminate() must
+    therefore actually tear the PTY session down and unblock wait().
     """
 
-    def __init__(self):
+    def __init__(self, on_kill=None):
         self._done = asyncio.Event()
         self.returncode: int | None = None
         self.pid = 0
+        self._on_kill = on_kill
 
     async def wait(self) -> int:
         await self._done.wait()
@@ -44,13 +46,23 @@ class _PTYProcessProxy:
         self._done.set()
 
     def kill(self):
-        pass
+        if self._done.is_set():
+            return
+        if self._on_kill:
+            try:
+                self._on_kill()
+            except Exception:
+                logger.exception("PTY proxy on_kill failed")
+        self.complete(-9)
 
     def terminate(self):
-        pass
+        self.kill()
 
     def send_signal(self, sig):
-        pass
+        if sig == signal.SIGINT:
+            # SIGINT means "interrupt the turn" — handled by InstanceManager
+            # calling backend.stop(); nothing to do at the proxy level.
+            return
 
     @property
     def stdout(self):
@@ -65,9 +77,33 @@ class CCMBackend(BasePTYBackend):
     """Drop-in PTY backend for CCM's InstanceManager."""
 
     def __init__(self, instance_manager):
-        super().__init__(max_sessions=20)
+        from ..bridge import BridgeHub
+
+        # Own BridgeHub so sessions get channel injection (preferred input
+        # path); without it send_prompt would fall back to PTY stdin.
+        self._bridge = BridgeHub()
+        self._bridge.start()
+        super().__init__(max_sessions=20, bridge=self._bridge)
         self._im = instance_manager
         self._proxies: dict[int, _PTYProcessProxy] = {}
+
+    async def _force_kill(self, instance_id: int) -> None:
+        """Tear down a session after proxy.kill() (dispatcher timeout)."""
+        consumer = self._consumers.pop(instance_id, None)
+        if consumer and not consumer.done():
+            consumer.cancel()
+        session = self._sessions.pop(instance_id, None)
+        if session:
+            try:
+                await session.stop()
+            except Exception:
+                logger.exception(
+                    "Failed to stop PTY session for instance %s", instance_id
+                )
+
+    async def shutdown(self) -> None:
+        await super().shutdown()
+        self._bridge.stop()
 
     def build_config(self, **kwargs) -> PTYConfig:
         env_overrides = {}
@@ -230,7 +266,11 @@ class CCMBackend(BasePTYBackend):
             if old_consumer and not old_consumer.done():
                 old_consumer.cancel()
 
-        proxy = _PTYProcessProxy()
+        proxy = _PTYProcessProxy(
+            on_kill=lambda: asyncio.get_event_loop().create_task(
+                self._force_kill(instance_id)
+            )
+        )
         self._proxies[instance_id] = proxy
         self._im.processes[instance_id] = proxy
 
