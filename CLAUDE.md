@@ -2,6 +2,18 @@
 
 > **重要：Claude 必须自主维护本文件。** 架构或约定变化时更新，保持简洁。
 
+## 架构（Phase 1 起）
+
+**PTY 只当宿主，消息走协议层**（设计参考 Teleos）：
+
+- **输入**：`Session.send_prompt` 默认经 BridgeHub → channel_server（MCP notification）注入，可唤起 idle 会话新 turn；stdin 仅为 fallback（bracketed-paste 整段写入）
+- **输出**：轮询 `~/.claude/projects/<re.sub(r'[^A-Za-z0-9]','-',cwd)>/<session_id>.jsonl`，normalize 成与 CCM StreamParser 对齐的事件
+- **回合结束**：`system/turn_duration` JSONL 哨兵（交互模式每 turn 恰一条，在所有消息之后；没有 result 事件）
+- **启动对话框**：spawn 前预写 `.claude.json` trust 条目（主）+ drain loop 通用 `Entertoconfirm` 自动应答（兜底，剥 ANSI + 折叠空白匹配）
+- **PTY 职责**：进程保活、Esc 中断、启动应答、输出活动信号（`_last_output`）
+
+历史教训见 PROGRESS.md，待办见 TODO.md。
+
 ## Git 信息
 
 - Remote: origin → https://github.com/zjw49246/Claude-Code-PTY.git

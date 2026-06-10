@@ -176,3 +176,61 @@ class TestSessionIntegration:
                     break
         finally:
             await session.stop()
+
+
+class TestChannelInjectionIntegration:
+    """End-to-end: prompt delivered via channel injection wakes a new turn.
+
+    This path was broken before Phase 1 (the dev-channels confirmation dialog
+    was never auto-answered, so the channel MCP server never started).
+    """
+
+    async def test_send_prompt_via_channel(self, tmp_path):
+        import re as _re
+        from claude_pty.bridge import BridgeHub
+
+        cwd = str(tmp_path / "chan_e2e")
+        os.makedirs(cwd, exist_ok=True)
+
+        bridge = BridgeHub()
+        bridge.start()
+        config = PTYConfig(
+            dangerously_skip_permissions=True,
+            default_model="haiku",
+            startup_wait=12.0,
+            response_timeout=120.0,
+        )
+        session = Session(
+            cwd=cwd, config=config, bridge=bridge, channel_inject_port=19891
+        )
+        await session.start()
+
+        injected_via_channel = []
+        real_inject = bridge.inject
+
+        def spy_inject(sid, content, meta=None):
+            ok = real_inject(sid, content, meta)
+            injected_via_channel.append(ok)
+            return ok
+
+        bridge.inject = spy_inject
+
+        try:
+            saw_tool_use = False
+            saw_text = False
+            async for event in session.send_prompt(
+                "Run `echo chan-e2e-ok` with the Bash tool and report the output."
+            ):
+                if event.event_type == EventType.TOOL_USE:
+                    saw_tool_use = True
+                if event.event_type == EventType.MESSAGE and event.content:
+                    if "chan-e2e-ok" in event.content:
+                        saw_text = True
+
+            # the prompt must have been delivered via channel, not stdin
+            assert injected_via_channel and injected_via_channel[0] is True
+            assert saw_tool_use, "expected a Bash tool_use event"
+            assert saw_text, "expected assistant to report echo output"
+        finally:
+            await session.stop()
+            bridge.stop()
