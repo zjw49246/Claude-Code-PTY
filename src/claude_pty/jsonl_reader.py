@@ -11,7 +11,10 @@ from .events import PTYEvent, EventType
 
 # JSONL message types that carry no useful event data
 _SKIP_TYPES = frozenset(
-    {"queue-operation", "attachment", "ai-title", "last-prompt"}
+    {
+        "queue-operation", "attachment", "ai-title", "last-prompt",
+        "mode", "permission-mode", "file-history-snapshot",
+    }
 )
 
 # System subtypes that are noisy telemetry
@@ -277,12 +280,17 @@ class JsonlReader:
         return events
 
     def is_response_complete(self, raw: dict) -> bool:
-        if raw.get("type") != "assistant":
-            return False
-        message = raw.get("message", {})
-        if not isinstance(message, dict):
-            return False
-        return message.get("stop_reason") == "end_turn"
+        """Turn-complete sentinel for interactive-mode JSONL.
+
+        CC writes exactly one `system/turn_duration` line per turn, after all
+        trailing messages. (`stop_reason == "end_turn"` is NOT reliable: it
+        appears on multiple messages of the same turn — e.g. separate thinking
+        and text block lines — and would truncate the event stream early.)
+        """
+        return (
+            raw.get("type") == "system"
+            and raw.get("subtype") == "turn_duration"
+        )
 
     async def poll_events(
         self, interval: float = 0.3

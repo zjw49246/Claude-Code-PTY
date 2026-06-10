@@ -234,13 +234,20 @@ class TestNormalize:
 
 
 class TestIsResponseComplete:
-    def test_end_turn(self):
+    def test_turn_duration_sentinel(self):
+        reader = JsonlReader("/dev/null")
+        raw = {"type": "system", "subtype": "turn_duration", "durationMs": 99}
+        assert reader.is_response_complete(raw) is True
+
+    def test_end_turn_no_longer_completes(self):
+        # end_turn appears on multiple lines of the same turn; the reliable
+        # per-turn sentinel is system/turn_duration (Phase 0 spike finding).
         reader = JsonlReader("/dev/null")
         raw = {
             "type": "assistant",
             "message": {"stop_reason": "end_turn"},
         }
-        assert reader.is_response_complete(raw) is True
+        assert reader.is_response_complete(raw) is False
 
     def test_tool_use_not_complete(self):
         reader = JsonlReader("/dev/null")

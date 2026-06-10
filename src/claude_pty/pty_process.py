@@ -4,7 +4,7 @@ import fcntl
 import json
 import os
 import pty
-import random
+import re
 import select
 import shutil
 import struct
@@ -22,6 +22,22 @@ from ._env import build_clean_env
 from .exceptions import PTYSpawnError, PTYDeadError
 
 logger = logging.getLogger(__name__)
+
+# ANSI escape sequences (CSI, OSC, charset selection)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]")
+
+# Generic marker for CC startup confirmation dialogs (trust dialog, dev-channels
+# warning, theme picker...). CC renders the TUI with cursor positioning, so
+# visible spaces are not literal spaces — match on whitespace-collapsed text.
+_CONFIRM_MARKER = "Entertoconfirm"
+_CONFIRM_WINDOW = 20.0  # only auto-confirm during startup
+_CONFIRM_COOLDOWN = 0.6  # absorb TUI redraw after answering
+
+
+def _collapse_for_prompt_match(data: bytes) -> str:
+    """Strip ANSI escapes and collapse all whitespace for marker matching."""
+    text = _ANSI_RE.sub("", data.decode("utf-8", errors="replace"))
+    return re.sub(r"\s+", "", text)
 
 
 class PTYProcess:
@@ -48,6 +64,7 @@ class PTYProcess:
         self.pid: int | None = None
 
         self._drain_thread: threading.Thread | None = None
+        self._last_output: float = 0.0  # monotonic ts of last PTY output
         self._running = False
         self._child_dead = threading.Event()
         self._spawn_time: float | None = None
@@ -55,7 +72,8 @@ class PTYProcess:
 
     @property
     def jsonl_path(self) -> str:
-        project_hash = self.cwd.replace("/", "-").replace("_", "-")
+        # CC's actual rule (verified): every non-alphanumeric char becomes '-'
+        project_hash = re.sub(r"[^A-Za-z0-9]", "-", self.cwd)
         config_base = self.config.config_dir or os.path.expanduser("~/.claude")
         return os.path.join(
             config_base, "projects", project_hash, f"{self.session_id}.jsonl"
@@ -69,6 +87,7 @@ class PTYProcess:
         if resume_session_id:
             self.session_id = resume_session_id
 
+        self._pretrust_workdir()
         if self._channel_inject_port:
             self._setup_mcp_config()
 
@@ -110,6 +129,58 @@ class PTYProcess:
             daemon=True,
         )
         self._drain_thread.start()
+
+    def _pretrust_workdir(self, claude_json_path: str | None = None) -> None:
+        """Pre-accept the trust dialog (and pre-approve our MCP server) by
+        writing the project entry into .claude.json before spawn.
+
+        This is the primary mechanism for suppressing startup dialogs; the
+        drain-loop auto-confirm is only a fallback. Atomic write (tmp+rename),
+        existing entry fields are preserved. Best-effort: failure is logged,
+        the auto-confirm fallback still covers us.
+        """
+        if claude_json_path is None:
+            if self.config.config_dir:
+                claude_json_path = os.path.join(
+                    self.config.config_dir, ".claude.json"
+                )
+            else:
+                claude_json_path = os.path.expanduser("~/.claude.json")
+
+        try:
+            cfg: dict = {}
+            if os.path.exists(claude_json_path):
+                try:
+                    with open(claude_json_path, encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    logger.warning(
+                        "pretrust[%s]: could not parse %s, leaving it alone",
+                        self.session_id[:8], claude_json_path,
+                    )
+                    return
+
+            projects = cfg.setdefault("projects", {})
+            entry = projects.setdefault(self.cwd, {})
+            entry["hasTrustDialogAccepted"] = True
+            entry["hasClaudeMdExternalIncludesApproved"] = True
+            entry["hasClaudeMdExternalIncludesWarningShown"] = True
+            entry.setdefault("projectOnboardingSeenCount", 1)
+            if self._channel_inject_port:
+                enabled = entry.setdefault("enabledMcpjsonServers", [])
+                if "pty-bridge" not in enabled:
+                    enabled.append("pty-bridge")
+
+            os.makedirs(os.path.dirname(claude_json_path) or ".", exist_ok=True)
+            tmp = claude_json_path + ".pty-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            os.rename(tmp, claude_json_path)
+        except OSError:
+            logger.exception(
+                "pretrust[%s]: failed to write %s",
+                self.session_id[:8], claude_json_path,
+            )
 
     def _setup_mcp_config(self) -> None:
         """Write .mcp.json with the channel server config."""
@@ -176,35 +247,45 @@ class PTYProcess:
         return cmd
 
     def _drain_loop(self) -> None:
-        startup_buf = b""
-        trust_handled = False
-        startup_deadline = time.monotonic() + 10
+        # Teleos-style generic startup auto-confirm: any dialog ending with
+        # "Enter to confirm" (trust dialog, dev-channels warning, theme picker)
+        # gets a \r. Whitespace-collapsed matching because CC positions text
+        # with cursor moves. After answering, cool down briefly, then re-check
+        # the buffer — a second consecutive dialog finishes rendering while CC
+        # is idle, so no further onData would drive the check.
+        confirm_buf = ""
+        confirm_deadline = time.monotonic() + _CONFIRM_WINDOW
+        cooldown_until = 0.0
 
         while self._running:
             try:
                 r, _, _ = select.select(
                     [self.master_fd], [], [], self.config.drain_interval
                 )
+                now = time.monotonic()
                 if r:
                     data = os.read(self.master_fd, self.config.drain_read_size)
                     if not data:
                         self._child_dead.set()
                         break
                     logger.debug("drain[%s]: %d bytes", self.session_id[:8], len(data))
-                    if not trust_handled and time.monotonic() < startup_deadline:
-                        startup_buf += data
-                        lower = startup_buf.lower()
-                        _startup_triggers = (
-                            b"trust", b"safety",
-                            b"choose the text style",
-                            b"get started",
-                            b"looks best with your terminal",
-                        )
-                        if any(t in lower for t in _startup_triggers):
-                            logger.info("drain[%s]: startup dialog detected, sending \\r", self.session_id[:8])
-                            os.write(self.master_fd, b"\r")
-                            trust_handled = True
-                            startup_buf = b""
+                    self._last_output = now
+                    if now < confirm_deadline:
+                        confirm_buf = (
+                            confirm_buf + _collapse_for_prompt_match(data)
+                        )[-2000:]
+                if (
+                    now < confirm_deadline
+                    and now >= cooldown_until
+                    and _CONFIRM_MARKER in confirm_buf
+                ):
+                    logger.info(
+                        "drain[%s]: startup dialog detected, sending \\r",
+                        self.session_id[:8],
+                    )
+                    os.write(self.master_fd, b"\r")
+                    confirm_buf = ""
+                    cooldown_until = now + _CONFIRM_COOLDOWN
             except OSError:
                 self._child_dead.set()
                 break
@@ -216,23 +297,23 @@ class PTYProcess:
                 pass
 
     def send_prompt(self, text: str) -> None:
+        """Write a prompt to CC's stdin and submit it.
+
+        The text is wrapped in bracketed-paste markers and written in one
+        chunk: no UTF-8 multibyte splitting, embedded newlines don't submit
+        early, and arbitrarily long prompts arrive instantly. (The old
+        char-by-char human-typing simulation was both slow and unsafe.)
+        """
         if not self.is_alive:
             raise PTYDeadError(f"Process {self.session_id} is not alive")
 
-        logger.info("send_prompt[%s]: %d chars, master_fd=%s", self.session_id[:8], len(text), self.master_fd)
-        for ch in text:
-            os.write(self.master_fd, ch.encode("utf-8"))
-            delay = random.gauss(
-                self.config.char_send_delay_mean,
-                self.config.char_send_delay_stddev,
-            )
-            time.sleep(
-                max(
-                    self.config.char_send_delay_min,
-                    min(self.config.char_send_delay_max, delay),
-                )
-            )
-        time.sleep(0.1)
+        logger.info(
+            "send_prompt[%s]: %d chars, master_fd=%s",
+            self.session_id[:8], len(text), self.master_fd,
+        )
+        payload = b"\x1b[200~" + text.encode("utf-8") + b"\x1b[201~"
+        os.write(self.master_fd, payload)
+        time.sleep(0.15)  # let Ink process the paste before submitting
         os.write(self.master_fd, b"\r")
 
     def send_interrupt(self) -> None:
