@@ -80,6 +80,20 @@ class JsonlReader:
         if msg_type in _SKIP_TYPES:
             return []
 
+        # Structured rate-limit signal (observed in -p stream; interactive
+        # JSONL may or may not record it — PTY output scan is the fallback)
+        if msg_type == "rate_limit_event":
+            return [
+                PTYEvent(
+                    event_type=EventType.SYSTEM_EVENT,
+                    content="rate_limit_event",
+                    is_error=True,
+                    raw_json=raw_json,
+                    timestamp=now,
+                    session_id=raw.get("sessionId") or raw.get("session_id"),
+                )
+            ]
+
         # Interactive JSONL nests content under "message"
         message = raw.get("message", {})
         if not isinstance(message, dict):

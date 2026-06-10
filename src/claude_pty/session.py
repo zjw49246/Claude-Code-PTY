@@ -51,6 +51,7 @@ class Session:
         # spawn with --resume instead of --session-id (which would collide).
         self._resume_existing = resume_existing
         self._pending_prompt: str | None = None
+        self._rate_limited_turn = False
 
     @property
     def session_id(self) -> str | None:
@@ -69,6 +70,13 @@ class Session:
     @property
     def jsonl_path(self) -> str | None:
         return self._process.jsonl_path if self._process else None
+
+    @property
+    def rate_limited(self) -> bool:
+        """True when this session hit a usage/rate limit (PTY banner or
+        structured JSONL signal). The host should rotate accounts."""
+        proc_flag = bool(self._process and getattr(self._process, "rate_limited", False))
+        return proc_flag or self._rate_limited_turn
 
     async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
@@ -211,6 +219,7 @@ class Session:
 
         deadline = time.monotonic() + timeout
         response_complete = False
+        self._rate_limited_turn = False
 
         while not response_complete and time.monotonic() < deadline:
             if not self._process.is_alive:
@@ -227,6 +236,11 @@ class Session:
             )
 
             for raw in messages:
+                if (
+                    raw.get("type") == "rate_limit_event"
+                    or raw.get("error") == "rate_limit"
+                ):
+                    self._rate_limited_turn = True
                 for event in self._reader.normalize(raw):
                     self._last_activity = time.monotonic()
                     yield event
@@ -234,6 +248,21 @@ class Session:
                 if self._reader.is_response_complete(raw):
                     response_complete = True
                     break
+
+            # PTY banner scan (drain loop) — end the turn as an error so the
+            # host can rotate accounts instead of waiting out the timeout.
+            if not response_complete and self.rate_limited:
+                yield PTYEvent(
+                    event_type=EventType.MESSAGE,
+                    role="assistant",
+                    content=(
+                        "usage limit reached — account hit its rate limit "
+                        "(detected in PTY session)"
+                    ),
+                    is_error=True,
+                    session_id=self.session_id,
+                )
+                break
 
             if not response_complete:
                 await asyncio.sleep(self.config.jsonl_poll_interval)

@@ -41,8 +41,19 @@ class SessionPool:
 
             if session_id in self._sessions:
                 session = self._sessions[session_id]
-                if session.is_alive:
+                same_config = (
+                    config_override is None
+                    or session.config.config_dir == config_override.config_dir
+                )
+                if session.is_alive and same_config:
                     return session
+                if session.is_alive:
+                    # config_dir changed (account rotation): the old-account
+                    # session must not be reused — stop it and respawn below.
+                    logger.info(
+                        "Session %s config_dir changed, recreating", session_id
+                    )
+                    await session.stop()
                 del self._sessions[session_id]
 
             while len(self._sessions) >= self.config.max_sessions:

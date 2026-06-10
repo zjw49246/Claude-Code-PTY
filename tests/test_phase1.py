@@ -326,3 +326,128 @@ class TestNoSpawnTimeStdinSend:
         s._restart_count = 1  # force resume path
         await s.start(initial_prompt="hello")
         assert sent == []  # nothing written at spawn time
+
+
+class TestRateLimitDetection:
+    """PTY-mode rate-limit detection (Phase 3): banner scan + JSONL signals."""
+
+    def test_collapsed_banner_matches(self):
+        from claude_pty.pty_process import _match_rate_limit, _collapse_for_prompt_match
+
+        # 真实文案经 TUI 光标排版后空格消失
+        chunk = b"\x1b[2K You've hit \x1b[1myour session limit\x1b[0m \xc2\xb7 resets 5:50pm (UTC)"
+        collapsed = _collapse_for_prompt_match(chunk).lower()
+        assert _match_rate_limit(collapsed)
+
+    def test_weekly_and_usage_wordings(self):
+        from claude_pty.pty_process import _match_rate_limit
+
+        assert _match_rate_limit("you'vehityourweeklylimit·resets8am")
+        assert _match_rate_limit("usagelimitreached")
+
+    def test_normal_output_not_matched(self):
+        from claude_pty.pty_process import _match_rate_limit
+
+        assert not _match_rate_limit("iimplementedtheratelimitermiddleware")
+
+    def test_normalize_rate_limit_event(self):
+        from claude_pty.jsonl_reader import JsonlReader
+        from claude_pty.events import EventType
+
+        reader = JsonlReader("/nonexistent")
+        events = reader.normalize({"type": "rate_limit_event",
+                                   "rate_limit_info": {"status": "rejected"}})
+        assert len(events) == 1
+        assert events[0].event_type == EventType.SYSTEM_EVENT
+        assert events[0].is_error is True
+
+    async def test_session_ends_turn_on_banner(self, tmp_path):
+        """drain loop 置 rate_limited 后，send_prompt 应以错误事件提前结束。"""
+        import asyncio
+        from claude_pty.session import Session
+        from claude_pty.config import PTYConfig
+        from claude_pty.events import EventType
+
+        session = Session(cwd="/w", session_id="sid-rl",
+                          config=PTYConfig(response_timeout=10, post_response_wait=0,
+                                           jsonl_poll_interval=0.01))
+
+        class FakeReader:
+            def read_new_messages(self): return []
+            def normalize(self, raw): return []
+            def is_response_complete(self, raw): return False
+
+        class FakeProc:
+            session_id = "sid-rl"
+            is_alive = True
+            exit_code = None
+            rate_limited = True  # banner detected
+
+            def send_prompt(self, text): pass
+
+        session._process = FakeProc()
+        session._reader = FakeReader()
+        session._started = True
+
+        events = []
+        async for ev in session.send_prompt("hello"):
+            events.append(ev)
+        assert any(ev.is_error and "usage limit reached" in (ev.content or "")
+                   for ev in events)
+        assert session.rate_limited is True
+
+    async def test_consumer_exit_code_nonzero_on_rate_limit(self):
+        from claude_pty.adapters.base import BasePTYBackend
+
+        captured = {}
+
+        class FakeBackend(BasePTYBackend):
+            async def on_exit(self, key, exit_code, **ctx):
+                captured["exit_code"] = exit_code
+
+        class FakeProc:
+            exit_code = None  # 进程还活着
+
+        class FakeSession:
+            rate_limited = True
+            _process = FakeProc()
+
+            async def send_prompt(self, prompt):
+                return
+                yield  # pragma: no cover
+
+        backend = FakeBackend()
+        await backend._consume("k", FakeSession(), "hi")
+        assert captured["exit_code"] == 1
+
+    async def test_pool_recreates_on_config_dir_change(self, monkeypatch):
+        from claude_pty.pool import SessionPool
+        from claude_pty.config import PTYConfig
+
+        created = []
+
+        class FakeSession:
+            def __init__(self, **kw):
+                self.config = kw.get("config")
+                self.session_id = kw.get("session_id")
+                self.is_alive = True
+                self.stopped = False
+                created.append(self)
+
+            async def start(self, initial_prompt=None): pass
+            async def stop(self): self.stopped = True
+
+        monkeypatch.setattr("claude_pty.pool.Session", FakeSession)
+        pool = SessionPool()
+        s1 = await pool.get_or_create("sid-1", "/w",
+                                      config_override=PTYConfig(config_dir="/acct-1"))
+        # 同 config_dir → 复用
+        s_same = await pool.get_or_create("sid-1", "/w",
+                                          config_override=PTYConfig(config_dir="/acct-1"))
+        assert s_same is s1
+        # 换号（config_dir 变化）→ 停旧建新
+        s2 = await pool.get_or_create("sid-1", "/w",
+                                      config_override=PTYConfig(config_dir="/acct-2"))
+        assert s2 is not s1
+        assert s1.stopped is True
+        assert len(created) == 2

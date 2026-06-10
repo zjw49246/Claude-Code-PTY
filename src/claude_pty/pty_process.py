@@ -33,6 +33,22 @@ _CONFIRM_MARKER = "Entertoconfirm"
 _CONFIRM_WINDOW = 20.0  # only auto-confirm during startup
 _CONFIRM_COOLDOWN = 0.6  # absorb TUI redraw after answering
 
+# Rate-limit detection in PTY output (whitespace-collapsed, lowercased).
+# The TUI always renders the limit banner even though interactive JSONL may
+# not record a structured event — this is the reliable signal for pool
+# rotation in PTY mode.
+_RATE_LIMIT_MARKERS = (
+    "hityoursessionlimit",
+    "hityourweeklylimit",
+    "hityourlimit",
+    "usagelimitreached",
+    "sessionlimitreached",
+)
+
+
+def _match_rate_limit(collapsed_lower: str) -> bool:
+    return any(m in collapsed_lower for m in _RATE_LIMIT_MARKERS)
+
 
 def _collapse_for_prompt_match(data: bytes) -> str:
     """Strip ANSI escapes and collapse all whitespace for marker matching."""
@@ -65,6 +81,7 @@ class PTYProcess:
 
         self._drain_thread: threading.Thread | None = None
         self._last_output: float = 0.0  # monotonic ts of last PTY output
+        self.rate_limited: bool = False  # set by drain loop on limit banner
         self._running = False
         self._child_dead = threading.Event()
         self._spawn_time: float | None = None
@@ -87,6 +104,7 @@ class PTYProcess:
         if resume_session_id:
             self.session_id = resume_session_id
 
+        self.rate_limited = False
         self._pretrust_workdir()
         if self._channel_inject_port:
             self._setup_mcp_config()
@@ -256,6 +274,7 @@ class PTYProcess:
         confirm_buf = ""
         confirm_deadline = time.monotonic() + _CONFIRM_WINDOW
         cooldown_until = 0.0
+        rl_buf = ""  # always-on rolling buffer for rate-limit banner
 
         while self._running:
             try:
@@ -270,10 +289,17 @@ class PTYProcess:
                         break
                     logger.debug("drain[%s]: %d bytes", self.session_id[:8], len(data))
                     self._last_output = now
+                    collapsed = _collapse_for_prompt_match(data)
                     if now < confirm_deadline:
-                        confirm_buf = (
-                            confirm_buf + _collapse_for_prompt_match(data)
-                        )[-2000:]
+                        confirm_buf = (confirm_buf + collapsed)[-2000:]
+                    if not self.rate_limited:
+                        rl_buf = (rl_buf + collapsed.lower())[-3000:]
+                        if _match_rate_limit(rl_buf):
+                            logger.warning(
+                                "drain[%s]: rate-limit banner detected in PTY output",
+                                self.session_id[:8],
+                            )
+                            self.rate_limited = True
                 if (
                     now < confirm_deadline
                     and now >= cooldown_until

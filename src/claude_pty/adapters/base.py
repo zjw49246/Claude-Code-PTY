@@ -96,6 +96,10 @@ class BasePTYBackend:
             exit_code = None
             if session._process:
                 exit_code = session._process.exit_code
+            if getattr(session, "rate_limited", False) and not exit_code:
+                # Surface the limit as a failed run so the host's pool
+                # rotation kicks in (it triggers on non-zero exit).
+                exit_code = 1
             logger.info("PTY consumer exiting for key=%s, exit_code=%s", key, exit_code)
             await self.on_exit(key, exit_code, **kwargs)
 
