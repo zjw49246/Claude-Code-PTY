@@ -46,6 +46,7 @@ class Session:
         self._send_lock = asyncio.Lock()
         self._bridge = bridge
         self._channel_inject_port = channel_inject_port
+        self._pending_prompt: str | None = None
 
     @property
     def session_id(self) -> str | None:
@@ -65,7 +66,7 @@ class Session:
     def jsonl_path(self) -> str | None:
         return self._process.jsonl_path if self._process else None
 
-    async def start(self) -> None:
+    async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
 
         resume_id = self._session_id if self._restart_count > 0 else None
@@ -80,6 +81,13 @@ class Session:
         )
 
         await loop.run_in_executor(None, self._process.spawn, resume_id)
+
+        # For resume: send prompt immediately to avoid Claude Code's 3s stdin timeout
+        if resume_id and initial_prompt:
+            self._pending_prompt = initial_prompt
+            await loop.run_in_executor(None, self._process.send_prompt, initial_prompt)
+        else:
+            self._pending_prompt = None
 
         self._session_id = self._process.session_id
         self._reader = JsonlReader(self._process.jsonl_path)
@@ -102,11 +110,30 @@ class Session:
             self._process.channels_enabled,
         )
 
+    _SLASH_COMMANDS = frozenset({
+        "/help", "/exit", "/clear", "/compact", "/config", "/cost",
+        "/doctor", "/init", "/login", "/logout", "/memory", "/mcp",
+        "/permissions", "/review", "/status", "/terminal-setup", "/vim",
+    })
+
+    def _is_slash_command(self, text: str) -> bool:
+        cmd = text.strip().split()[0] if text.strip() else ""
+        return cmd in self._SLASH_COMMANDS or (cmd.startswith("/") and len(cmd) > 1)
+
     async def send_prompt(
         self,
         text: str,
         timeout: float | None = None,
     ) -> AsyncIterator[PTYEvent]:
+        if self._is_slash_command(text):
+            cmd = text.strip().split()[0]
+            yield PTYEvent(
+                event_type=EventType.RESULT,
+                role="system",
+                content=f"Slash command '{cmd}' is not supported in PTY mode. Use $ commands (e.g. $help) for CCM skills.",
+                is_error=True,
+            )
+            return
         async with self._send_lock:
             async for event in self._send_prompt_inner(text, timeout):
                 yield event
@@ -120,14 +147,20 @@ class Session:
             raise SessionError("Session not started. Call start() first.")
 
         if not self._process.is_alive:
-            await self._auto_resume()
+            await self._auto_resume(text)
 
         timeout = timeout or self.config.response_timeout
         loop = asyncio.get_running_loop()
 
-        logger.info("Session %s: sending prompt (%d chars) via executor...", self.session_id, len(text))
-        await loop.run_in_executor(None, self._process.send_prompt, text)
-        logger.info("Session %s: prompt sent successfully", self.session_id)
+        # Skip sending if prompt was already sent during start() (resume case)
+        if self._pending_prompt and self._pending_prompt == text:
+            logger.info("Session %s: prompt already sent during start, skipping re-send", self.session_id)
+            self._pending_prompt = None
+        else:
+            self._pending_prompt = None
+            logger.info("Session %s: sending prompt (%d chars) via executor...", self.session_id, len(text))
+            await loop.run_in_executor(None, self._process.send_prompt, text)
+            logger.info("Session %s: prompt sent successfully", self.session_id)
         self._last_activity = time.monotonic()
 
         deadline = time.monotonic() + timeout
@@ -256,7 +289,7 @@ class Session:
         self._restart_count += 1
         await self.start()
 
-    async def _auto_resume(self) -> None:
+    async def _auto_resume(self, prompt: str | None = None) -> None:
         if self._restart_count >= self.config.max_restart_attempts:
             raise SessionError(
                 f"Session {self.session_id} exceeded max restart attempts "
@@ -277,7 +310,7 @@ class Session:
         backoff = self.config.restart_backoff_base ** self._restart_count
         await asyncio.sleep(backoff)
 
-        await self.start()
+        await self.start(initial_prompt=prompt)
 
     def _on_process_death(self, proc: PTYProcess) -> None:
         logger.warning(

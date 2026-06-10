@@ -60,6 +60,7 @@ class BasePTYBackend:
             session_id=sid or "",
             cwd=cwd,
             config_override=config,
+            initial_prompt=prompt if sid else None,
         )
         self._sessions[key] = session
 
