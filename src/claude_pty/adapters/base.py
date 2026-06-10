@@ -130,6 +130,10 @@ class BasePTYBackend:
             **{k: v for k, v in params.items() if k not in ("prompt", "cwd")},
         )
 
+    async def drain_idle_sessions(self) -> int:
+        """Reclaim idle PTY sessions (host toggled PTY mode off)."""
+        return await self._pool.drain_idle()
+
     async def shutdown(self) -> None:
         for consumer in self._consumers.values():
             consumer.cancel()

@@ -108,6 +108,31 @@ class SessionPool:
             if session:
                 await session.stop()
 
+    async def drain_idle(self) -> int:
+        """Stop and remove all sessions not currently mid-prompt.
+
+        Used when the host app switches PTY mode off: idle sessions are
+        reclaimed immediately, in-flight ones finish their turn and are
+        left to normal lifecycle.
+        """
+        async with self._lock:
+            idle_ids = [
+                sid for sid, session in self._sessions.items()
+                if not session._send_lock.locked()
+            ]
+            stopped = 0
+            for sid in idle_ids:
+                session = self._sessions.pop(sid)
+                self._access_order.pop(sid, None)
+                try:
+                    await session.stop()
+                except Exception:
+                    logger.exception("Failed to stop idle session %s", sid)
+                stopped += 1
+            if stopped:
+                logger.info("Drained %d idle session(s)", stopped)
+            return stopped
+
     async def stop_all(self) -> None:
         async with self._lock:
             for session in self._sessions.values():

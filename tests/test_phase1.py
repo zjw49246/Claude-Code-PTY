@@ -238,3 +238,34 @@ class TestResumeExisting:
         assert "--resume" in cmd and "abc" in cmd
         cmd2 = proc._build_command(None)
         assert "--session-id" in cmd2 and "--resume" not in cmd2
+
+
+class TestDrainIdle:
+    async def test_drain_stops_only_idle_sessions(self):
+        import asyncio
+        from claude_pty.pool import SessionPool
+
+        pool = SessionPool()
+
+        class FakeSession:
+            def __init__(self, locked):
+                self._send_lock = asyncio.Lock()
+                self._locked = locked
+                self.stopped = False
+                self.is_alive = True
+                self.idle_seconds = 0.0
+
+            async def stop(self):
+                self.stopped = True
+
+        idle = FakeSession(locked=False)
+        busy = FakeSession(locked=True)
+        await busy._send_lock.acquire()  # mid-prompt
+        pool._sessions = {"idle": idle, "busy": busy}
+        pool._access_order = {"idle": 1.0, "busy": 2.0}
+
+        stopped = await pool.drain_idle()
+        assert stopped == 1
+        assert idle.stopped is True
+        assert busy.stopped is False
+        assert list(pool._sessions) == ["busy"]
