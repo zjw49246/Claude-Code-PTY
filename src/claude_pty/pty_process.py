@@ -168,6 +168,10 @@ class PTYProcess:
         return cmd
 
     def _drain_loop(self) -> None:
+        startup_buf = b""
+        trust_handled = False
+        startup_deadline = time.monotonic() + 10
+
         while self._running:
             try:
                 r, _, _ = select.select(
@@ -178,6 +182,14 @@ class PTYProcess:
                     if not data:
                         self._child_dead.set()
                         break
+                    # During startup, watch for workspace trust dialog
+                    if not trust_handled and time.monotonic() < startup_deadline:
+                        startup_buf += data
+                        lower = startup_buf.lower()
+                        if b"trust" in lower or b"safety" in lower:
+                            os.write(self.master_fd, b"\r")
+                            trust_handled = True
+                            startup_buf = b""
             except OSError:
                 self._child_dead.set()
                 break
