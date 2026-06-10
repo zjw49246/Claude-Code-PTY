@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>claude-pty 框架技术报告</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface2: #334155;
+    --border: #475569;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #818cf8;
+    --green: #4ade80;
+    --orange: #fb923c;
+    --red: #f87171;
+    --pink: #f472b6;
+    --yellow: #fbbf24;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.8;
+  }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 70px 40px 50px;
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: 2.8rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 10px;
+  }
+  .hero .sub {
+    font-size: 1.15rem;
+    color: var(--muted);
+    max-width: 600px;
+    margin: 0 auto;
+  }
+
+  /* Container */
+  .wrap {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 24px;
+  }
+
+  /* Sections */
+  section { margin-bottom: 56px; }
+  h2 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--surface2);
+  }
+  h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 28px 0 12px;
+  }
+  p, li { color: var(--text); margin-bottom: 12px; }
+  strong { color: #fff; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* Inline code */
+  code {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    background: var(--surface2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+
+  /* Code blocks */
+  pre {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    overflow-x: auto;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.88rem;
+    line-height: 1.65;
+    margin: 16px 0;
+    color: var(--text);
+  }
+  pre code { background: none; padding: 0; }
+  .cm { color: #8b949e; font-style: italic; }
+  .kw { color: #ff7b72; }
+  .str { color: #a5d6ff; }
+  .fn { color: #d2a8ff; }
+  .num { color: #79c0ff; }
+  .cls { color: #79c0ff; }
+
+  /* Comparison cards */
+  .vs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin: 20px 0;
+  }
+  @media (max-width: 700px) { .vs { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .card h3 { margin-top: 0; }
+  .card ul { margin: 8px 0 0 20px; }
+  .card-old { border-left: 4px solid var(--red); }
+  .card-new { border-left: 4px solid var(--green); }
+
+  /* Flow diagrams — vertical numbered steps */
+  .steps { list-style: none; padding: 0; margin: 20px 0; }
+  .step {
+    display: flex;
+    gap: 16px;
+    position: relative;
+    margin-bottom: 0;
+  }
+  .step:not(:last-child) { padding-bottom: 8px; }
+  .step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 17px;
+    top: 36px;
+    bottom: 0;
+    width: 2px;
+    background: var(--surface2);
+  }
+  .step-n {
+    width: 36px; height: 36px;
+    border: 2px solid var(--accent);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.85rem; color: var(--accent);
+    flex-shrink: 0;
+    background: var(--bg);
+    z-index: 1;
+  }
+  .step-body { padding: 5px 0 16px; flex: 1; }
+  .step-body strong { display: block; margin-bottom: 4px; }
+  .step-body span, .step-body p { color: var(--muted); font-size: 0.93rem; margin: 0; }
+
+  /* Callout boxes */
+  .callout {
+    background: var(--surface);
+    border-left: 4px solid var(--orange);
+    border-radius: 0 10px 10px 0;
+    padding: 16px 20px;
+    margin: 16px 0;
+  }
+  .callout-blue { border-left-color: var(--accent); }
+  .callout-green { border-left-color: var(--green); }
+  .callout-red { border-left-color: var(--red); }
+  .callout strong { color: var(--orange); }
+  .callout-blue strong { color: var(--accent); }
+  .callout-green strong { color: var(--green); }
+  .callout-red strong { color: var(--red); }
+
+  /* ASCII diagram */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.84rem;
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 16px 0;
+  }
+  .d-blue { color: var(--accent); font-weight: 600; }
+  .d-green { color: var(--green); }
+  .d-orange { color: var(--orange); }
+  .d-muted { color: var(--muted); }
+  .d-red { color: var(--red); }
+  .d-pink { color: var(--pink); }
+
+  /* Summary table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    padding: 10px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--surface2);
+  }
+  th {
+    background: var(--surface);
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .footer {
+    text-align: center;
+    padding: 40px 24px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 28px;
+    margin: 20px 0 40px;
+  }
+  .toc h3 { margin: 0 0 10px; color: var(--text); }
+  .toc ol { margin: 0 0 0 20px; }
+  .toc li { margin-bottom: 4px; }
+  .toc a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>claude-pty</h1>
+  <p class="sub">用 PTY（伪终端）驱动 Claude Code，替代 <code>-p</code> 模式的 Python 框架</p>
+</div>
+
+<div class="wrap">
+
+<nav class="toc">
+  <h3>目录</h3>
+  <ol>
+    <li><a href="#s1">一句话理解：-p 模式 vs PTY 模式</a></li>
+    <li><a href="#s2">什么是 PTY？为什么需要它？</a></li>
+    <li><a href="#s3">Step by Step：一次 prompt 是怎么跑完的</a></li>
+    <li><a href="#s4">四个会踩的坑和我们怎么解决的</a></li>
+    <li><a href="#s5">多轮对话和会话池</a></li>
+    <li><a href="#s6">Channels：执行中途注入消息</a></li>
+    <li><a href="#s7">权限中继：程序化控制工具执行</a></li>
+    <li><a href="#s8">崩溃恢复</a></li>
+    <li><a href="#s9">代码示例</a></li>
+    <li><a href="#s10">项目概览</a></li>
+  </ol>
+</nav>
+
+<!-- ========================================================== -->
+<section id="s1">
+<h2>1. 一句话理解：-p 模式 vs PTY 模式</h2>
+
+<div class="vs">
+  <div class="card card-old">
+    <h3 style="color:var(--red);">-p 模式（现在）</h3>
+    <p>每次发 prompt 都<strong>新启动一个 CC 进程</strong>，等它处理完，再杀掉。多轮对话靠 <code>--resume</code> 参数恢复上下文。</p>
+    <p>就像<strong>每次想聊天都要重新打开 APP</strong>，打开要等 5-8 秒，聊完就关掉。</p>
+  </div>
+  <div class="card card-new">
+    <h3 style="color:var(--green);">PTY 模式（本框架）</h3>
+    <p>CC 进程<strong>一直开着</strong>，你想发 prompt 就直接打字进去，它立刻响应。多轮对话天然连续。</p>
+    <p>就像<strong>一直开着聊天窗口</strong>，想说什么就说什么，对方立刻回复。</p>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr><th>对比维度</th><th>-p 模式</th><th>PTY 模式</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>每次 prompt 开销</td><td>5-8 秒冷启动</td><td>即时响应</td></tr>
+    <tr><td>多轮上下文</td><td>需要 --resume + session 文件</td><td>天然连续，进程一直活着</td></tr>
+    <tr><td>中途注入消息</td><td>不可能</td><td>Channels MCP 支持</td></tr>
+    <tr><td>并发 session</td><td>每个 prompt 独立进程</td><td>LRU 会话池复用进程</td></tr>
+    <tr><td>输出读取</td><td>解析 stdout 的 stream-json</td><td>读取官方 JSONL session 文件</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ========================================================== -->
+<section id="s2">
+<h2>2. 什么是 PTY？为什么需要它？</h2>
+
+<p>当你在终端里运行 <code>claude</code> 命令，CC 启动了一个交互式 TUI（终端界面）——有光标、有输入框、会检测你的按键。
+它怎么知道自己在一个"终端"里？因为它检查了自己的 stdin/stdout 是不是连着一个 <strong>TTY</strong>（终端设备）。</p>
+
+<p>问题来了：如果你的 Python 程序用 <code>subprocess.Popen</code> 启动 CC，stdin/stdout 连的是 <strong>管道（pipe）</strong>，不是终端。CC 检测到这一点，会拒绝进入交互模式，因为它的 TUI 没法在管道上画界面。</p>
+
+<div class="callout callout-blue">
+  <strong>PTY（Pseudo Terminal，伪终端）</strong> 就是解决方案。它是操作系统提供的一对设备：
+  <br>• <strong>master 端</strong>：你的 Python 程序拿着，往里写字符 = "模拟键盘输入"，从里读数据 = "读屏幕输出"
+  <br>• <strong>slave 端</strong>：CC 拿着，它看到的是一个真正的终端设备
+  <br><br>CC 完全不知道对面不是人类在打字。它开开心心进入交互模式，画它的 TUI，等输入。
+</div>
+
+<div class="diagram"><span class="d-blue">你的 Python 程序</span>                                <span class="d-green">Claude Code 进程</span>
+
+  往 master_fd 写字符  ─────→  slave 端（看起来是真终端）
+  "实现登录功能\r"              CC 觉得："有人在键盘上打字"
+                                 CC 开始处理 prompt
+                                 CC 把响应写到 stdout
+  从 master_fd 读数据  ←─────  slave 端输出（ANSI 转义 + TUI 渲染）
+  <span class="d-muted">（但我们不解析这个输出，太乱了）</span>
+
+  <span class="d-orange">同时，CC 把结构化数据写到 JSONL 文件</span>
+  <span class="d-orange">我们直接读 JSONL 文件获取干净的响应 ←── 这才是我们真正的数据源</span></div>
+</section>
+
+<!-- ========================================================== -->
+<section id="s3">
+<h2>3. Step by Step：一次 prompt 是怎么跑完的</h2>
+
+<p>用户代码调用了 <code>session.send_prompt("实现登录功能")</code>，背后发生了什么：</p>
+
+<h3>阶段一：进程启动（只在第一次发生）</h3>
+
+<ol class="steps">
+  <li class="step">
+    <div class="step-n">1</div>
+    <div class="step-body">
+      <strong>创建 PTY 对</strong>
+      <span>调用 <code>pty.openpty()</code> 拿到 master_fd 和 slave_fd。设置终端大小为 50 行 × 200 列。</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">2</div>
+    <div class="step-body">
+      <strong>清洗环境变量</strong>
+      <span>删除所有含 CLAUDE、CLAUDECODE、AI_AGENT 的环境变量（防止干扰），设置 TERM=xterm-256color 让 CC 认为在一个正常终端里。</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">3</div>
+    <div class="step-body">
+      <strong>启动 CC 进程</strong>
+      <span>用 <code>subprocess.Popen</code> 启动：<code>claude --dangerously-skip-permissions --session-id {uuid}</code>，stdin/stdout/stderr 都连到 slave 端。CC 看到自己在一个终端里，进入交互模式，显示 TUI 欢迎界面。</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">4</div>
+    <div class="step-body">
+      <strong>启动 drain 线程</strong>
+      <span>一个后台守护线程，每 50ms 从 master_fd 读一次数据，把 CC 的 TUI 输出"排掉"。<strong>这一步至关重要</strong>——原因在后面解释。</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">5</div>
+    <div class="step-body">
+      <strong>等待 CC 就绪</strong>
+      <span>等 12 秒（可配置），让 CC 完成初始化。这段时间 CC 在加载模型配置、MCP 服务器等。初始化产生的 JSONL 消息被跳过。</span>
+    </div>
+  </li>
+</ol>
+
+<h3>阶段二：发送 prompt</h3>
+
+<ol class="steps">
+  <li class="step">
+    <div class="step-n">6</div>
+    <div class="step-body">
+      <strong>逐字符写入 prompt 到 master_fd</strong>
+      <span>
+        把 "实现登录功能" 一个字一个字地写进 PTY。每个字符之间等 30-70 毫秒的随机间隔。
+        <br><br>
+        为什么不能一次性写入整个字符串？因为 CC 的 TUI 用了 <strong>raw mode</strong>——它在监听每一个按键事件。
+        如果你一次性把整个字符串灌进去，CC 的输入缓冲区会乱掉，第一轮可能没问题，第二轮就会吞字符。
+        逐字符加随机间隔，等于在模拟一个人在打字。
+      </span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">7</div>
+    <div class="step-body">
+      <strong>写完后发送回车 <code>\r</code></strong>
+      <span>告诉 CC "输入完了，可以处理了"。CC 开始生成响应。</span>
+    </div>
+  </li>
+</ol>
+
+<h3>阶段三：读取响应</h3>
+
+<ol class="steps">
+  <li class="step">
+    <div class="step-n">8</div>
+    <div class="step-body">
+      <strong>每 300ms 轮询 JSONL 文件</strong>
+      <span>
+        CC 在处理请求时，会把每一步的结构化数据写入 JSONL session 文件
+        （路径：<code>~/.claude/projects/{项目路径hash}/{session_id}.jsonl</code>）。
+        <br><br>
+        我们<strong>不去解析 PTY 的输出</strong>（那里面全是 ANSI 颜色码、光标移动、进度条动画等等，根本没法用），
+        而是直接读这个 JSONL 文件。每行是一个 JSON 对象，包含消息类型、内容、工具调用等完整信息。
+      </span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">9</div>
+    <div class="step-body">
+      <strong>把每条 JSONL 消息转换成标准事件 yield 出去</strong>
+      <span>
+        JSONL 文件里的格式长这样：<code>{"type":"assistant","message":{"content":[...]}}</code>
+        <br><br>
+        我们的 <code>normalize()</code> 函数把它转换成统一的 PTYEvent，输出格式跟 CCM 的 StreamParser 完全一致。
+        这样 CCM 现有的事件处理代码 <strong>一行不用改</strong> 就能直接对接。
+      </span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">10</div>
+    <div class="step-body">
+      <strong>检测到 <code>stop_reason == "end_turn"</code>，响应结束</strong>
+      <span>
+        CC 写了一条 type=assistant 且 stop_reason=end_turn 的 JSONL 行，说明它说完了。
+        等 3 秒让 CC 回到输入状态，准备接收下一条 prompt。
+      </span>
+    </div>
+  </li>
+</ol>
+
+<div class="diagram"><span class="d-blue">时间线</span>
+
+ 0s     你的代码: <span class="d-green">session.send_prompt("实现登录功能")</span>
+        ├── PTYProcess: 逐字符写入 "实现登录功能" + "\r"
+        │   每个字符间隔 ~50ms，总共 ~0.3 秒
+ 0.3s   │
+        │   CC 开始处理...
+        │
+ 0.6s   JsonlReader: 第 1 次轮询 JSONL，发现新的 assistant 消息
+        ├── <span class="d-orange">yield PTYEvent(type=thinking, content="让我思考...")</span>
+        │
+ 1.2s   JsonlReader: 第 2 次轮询
+        ├── <span class="d-orange">yield PTYEvent(type=message, content="好的，我来实现...")</span>
+        │
+ 3.0s   JsonlReader: 第 N 次轮询
+        ├── <span class="d-orange">yield PTYEvent(type=tool_use, tool_name="Edit")</span>
+        │
+ 5.0s   JsonlReader: 发现 tool_result
+        ├── <span class="d-orange">yield PTYEvent(type=tool_result, content="文件已修改")</span>
+        │
+ 8.0s   JsonlReader: 发现 stop_reason == "end_turn"
+        ├── <span class="d-orange">yield PTYEvent(type=result, cost_usd=0.04)</span>
+        │
+ 8.0s   <span class="d-green">send_prompt 迭代结束</span>
+        等 3 秒让 CC 回到输入状态...
+        │
+ 11.0s  <span class="d-muted">可以发下一条 prompt 了</span></div>
+
+<h3>你的代码看到的</h3>
+
+<pre><code><span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(<span class="str">"实现登录功能"</span>):
+    <span class="fn">print</span>(event.event_type, event.content)
+
+<span class="cm"># 输出（实时逐条 yield，不是等全部完成）：</span>
+<span class="cm"># thinking   "让我来分析一下需求..."</span>
+<span class="cm"># message    "好的，我来实现登录功能。首先..."</span>
+<span class="cm"># tool_use   Edit /src/auth.py</span>
+<span class="cm"># tool_result 文件已修改</span>
+<span class="cm"># message    "登录功能已实现，包括..."</span>
+<span class="cm"># result     cost_usd=0.04</span></code></pre>
+</section>
+
+<!-- ========================================================== -->
+<section id="s4">
+<h2>4. 四个会踩的坑和我们怎么解决的</h2>
+
+<h3>坑 1：PTY 缓冲区只有 4KB，不排空就死锁</h3>
+
+<div class="callout callout-red">
+  <strong>问题：</strong>
+  Linux PTY 的内核缓冲区只有 4KB（<code>N_TTY_BUF_SIZE</code>）。CC 输出的 TUI 渲染数据非常多（ANSI 转义码、进度条、代码高亮……），很快就能把 4KB 填满。一旦缓冲区满了，CC 的 <code>write()</code> 系统调用就会 <strong>阻塞</strong>——CC 整个进程挂住，不再处理任何事情。
+</div>
+
+<div class="callout callout-green">
+  <strong>解决：</strong>
+  启动一个独立的 <strong>daemon 线程</strong>，每 50ms 执行 <code>select() + os.read(65536)</code>，把 CC 输出的数据全部读走扔掉。
+  我们不需要这些数据（TUI 渲染对我们没用），但必须一直"排水"，不让缓冲区满。
+  <br><br>
+  这个线程是纯同步的，不碰 asyncio，所以不会有事件循环冲突。它就像一个 "7×24 小时开着的排水泵"。
+</div>
+
+<div class="diagram"><span class="d-red">如果没有 drain 线程：</span>
+
+  CC 进程: write("ANSI渲染数据...") → write() → write() → <span class="d-red">缓冲区满！write() 阻塞！</span>
+           CC 挂住了，什么也不做
+           你的 prompt 永远不会被处理
+
+<span class="d-green">有 drain 线程：</span>
+
+  CC 进程: write("ANSI渲染数据...") → write() → write() → 正常写入，继续工作
+           │                            │              │
+  drain:   read() 读走              read() 读走     read() 读走
+           数据直接丢弃              数据直接丢弃    数据直接丢弃</div>
+
+
+<h3>坑 2：逐字符输入，不能批量写入</h3>
+
+<div class="callout callout-red">
+  <strong>问题：</strong>
+  CC 的前端是 Ink（React for CLI），运行在 terminal <strong>raw mode</strong>。在 raw mode 下，终端逐个按键地传递给应用，没有行缓冲。如果你一次性把 "实现登录功能\r" 整个字符串写入 PTY，CC 的输入处理在第一轮可能凑合能用，但第二轮开始就会出现吞字符、缓冲区错乱的问题。
+</div>
+
+<div class="callout callout-green">
+  <strong>解决：</strong>
+  一个字符一个字符地写，每个字符之间等一个高斯随机分布的延迟（均值 50ms，标准差 20ms，钳位在 10-150ms）。
+  相当于模拟一个打字速度中等的人类。写完最后一个字符后额外等 100ms，再发回车 <code>\r</code>。
+</div>
+
+<pre><code><span class="cm"># 实际的 send_prompt 核心逻辑（简化版）</span>
+<span class="kw">for</span> ch <span class="kw">in</span> <span class="str">"实现登录功能"</span>:
+    os.<span class="fn">write</span>(master_fd, ch.<span class="fn">encode</span>(<span class="str">"utf-8"</span>))
+    time.<span class="fn">sleep</span>(random.<span class="fn">gauss</span>(<span class="num">0.05</span>, <span class="num">0.02</span>))  <span class="cm"># 30-70ms 随机间隔</span>
+time.<span class="fn">sleep</span>(<span class="num">0.1</span>)
+os.<span class="fn">write</span>(master_fd, <span class="str">b"\r"</span>)  <span class="cm"># 回车：提交输入</span></code></pre>
+
+
+<h3>坑 3：JSONL 文件 partial write，读到半截数据</h3>
+
+<div class="callout callout-red">
+  <strong>问题：</strong>
+  CC 往 JSONL 文件写数据时，一行可能分多次 <code>write()</code> 系统调用完成。如果我们读文件的时机刚好夹在两次 write 之间，就会读到半截 JSON，比如 <code>{"type":"assis</code> —— 直接 <code>json.loads()</code> 就炸了。
+  <br><br>
+  更糟的是，如果你把这个半截数据丢弃，下次读到后半段 <code>tant","message":{...}}</code> 也拼不起来了。<strong>消息永久丢失</strong>。
+</div>
+
+<div class="callout callout-green">
+  <strong>解决：行缓冲机制</strong>
+  <br>读到的数据按 <code>\n</code> 分割。最后一段如果没有以 <code>\n</code> 结尾，就是不完整的行，存到 <code>_buffer</code> 里。
+  下次读取时，新数据拼接在 buffer 后面再分割。只有完整的行（以 <code>\n</code> 结尾的）才会被 JSON 解析。
+</div>
+
+<div class="diagram"><span class="d-blue">第一次读取：</span>
+  文件内容:  {"type":"assistant",...}\n{"type":"us
+                                       <span class="d-red">↑ 这里被截断了</span>
+  完整行:    {"type":"assistant",...}  → <span class="d-green">解析，返回</span>
+  buffer:    {"type":"us              → <span class="d-orange">保留，等下次</span>
+
+<span class="d-blue">第二次读取：</span>
+  新数据:    er","message":{...}}\n
+  拼接:      {"type":"user","message":{...}}\n
+  完整行:    {"type":"user","message":{...}} → <span class="d-green">解析，返回</span>
+  buffer:    <span class="d-muted">（空）</span></div>
+
+
+<h3>坑 4：os.fork() 跟 asyncio 不兼容</h3>
+
+<div class="callout callout-red">
+  <strong>问题：</strong>
+  很多 PTY 教程用 <code>os.fork()</code> + <code>os.exec()</code> 来启动子进程。但在一个有 asyncio event loop 或多线程的父进程里 fork，
+  子进程会继承父进程的锁状态和线程表，导致死锁或状态不一致。我们的框架是给 FastAPI/asyncio 后端用的，fork 直接排除。
+</div>
+
+<div class="callout callout-green">
+  <strong>解决：</strong>
+  用 <code>pty.openpty()</code> 先创建 PTY 对，然后用 <code>subprocess.Popen</code>（内部用 <code>posix_spawn</code> 或安全的 fork+exec）
+  启动 CC，把 slave_fd 作为 stdin/stdout/stderr 传进去。父进程拿着 master_fd 做读写。
+  <br><br>
+  <code>subprocess.Popen</code> + <code>start_new_session=True</code> + <code>close_fds=True</code> 确保子进程在自己的 session 组里，文件描述符干净。
+</div>
+</section>
+
+<!-- ========================================================== -->
+<section id="s5">
+<h2>5. 多轮对话和会话池</h2>
+
+<p>因为 CC 进程一直活着，<strong>多轮对话天然连续</strong>——你不需要任何额外参数，直接发第二条 prompt 就行：</p>
+
+<pre><code><span class="cm"># 第一轮</span>
+<span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(<span class="str">"记住数字 42"</span>):
+    ...
+<span class="cm"># 第二轮（CC 已经知道 42）</span>
+<span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(<span class="str">"我刚才说的数字是什么？"</span>):
+    ...  <span class="cm"># CC 会回答 "42"</span></code></pre>
+
+<p>当你需要同时运行多个 session（比如给 CCM 的多个 task 各开一个），<strong>SessionPool</strong> 帮你管理：</p>
+
+<pre><code>pool = <span class="fn">SessionPool</span>(config=<span class="fn">PTYConfig</span>(max_sessions=<span class="num">20</span>))
+
+<span class="cm"># 每个 task 用自己的 session_id，pool 自动创建或复用</span>
+session_a = <span class="kw">await</span> pool.<span class="fn">get_or_create</span>(<span class="str">"task-001"</span>, cwd=<span class="str">"/project-a"</span>)
+session_b = <span class="kw">await</span> pool.<span class="fn">get_or_create</span>(<span class="str">"task-002"</span>, cwd=<span class="str">"/project-b"</span>)
+
+<span class="cm"># 下次用同一个 session_id，直接复用已有进程</span>
+session_a_again = <span class="kw">await</span> pool.<span class="fn">get_or_create</span>(<span class="str">"task-001"</span>, cwd=<span class="str">"/project-a"</span>)
+<span class="cm"># session_a_again 就是 session_a，同一个 CC 进程</span></code></pre>
+
+<div class="callout callout-blue">
+  <strong>LRU 淘汰：</strong>
+  如果 session 数量达到上限（默认 20），pool 会自动关掉最久没用过的空闲 session，腾出位置给新的。
+  优先淘汰超过 5 分钟没用的 session；如果都在忙，淘汰最老的没在执行 prompt 的那个。
+</div>
+</section>
+
+<!-- ========================================================== -->
+<section id="s6">
+<h2>6. Channels：执行中途注入消息</h2>
+
+<p>正常的 prompt → response 流程够用的场景，用 JSONL 模式就行（上面讲的那些）。</p>
+
+<p>但有时候你需要在 <strong>CC 正在执行工具的时候</strong> 给它发一条消息——比如"需求变了，别做了"或者"顺便也改一下这个文件"。
+这时候 CC 已经在处理中，你不能再 <code>send_prompt</code>（它会等上一个 prompt 结束）。</p>
+
+<p><strong>Channels</strong> 是 CC 官方提供的 MCP（Model Context Protocol）扩展，允许在 CC 执行过程中往它的上下文注入消息。
+CC 会在下一个工具调用的边界读到这条消息。</p>
+
+<h3>工作原理</h3>
+
+<div class="diagram"><span class="d-blue">你的后端</span>                        <span class="d-blue">BridgeHub</span>              <span class="d-green">channel_server</span>             <span class="d-pink">Claude Code</span>
+   │                              (中心路由)         (每个 session 一个,       (正在工作中...)
+   │                                 │               作为 MCP 服务器运行)         │
+   │                                 │                      │                      │
+   │  <span class="d-orange">inject("需求变了")</span>            │                      │                      │
+   ├────────────────────────────────→│                      │                      │
+   │                                 │  HTTP POST /inject   │                      │
+   │                                 ├─────────────────────→│                      │
+   │                                 │                      │  JSON-RPC 通知       │
+   │                                 │                      │  (写到 CC 的 stdin)  │
+   │                                 │                      ├─────────────────────→│
+   │                                 │                      │                      │
+   │                                 │                      │              <span class="d-pink">CC 在下一个工具</span>
+   │                                 │                      │              <span class="d-pink">调用边界读到消息:</span>
+   │                                 │                      │              <span class="d-pink">&lt;channel&gt;需求变了&lt;/channel&gt;</span>
+   │                                 │                      │              <span class="d-pink">CC 调整后续行为</span></div>
+
+<h3>三个组件的角色</h3>
+
+<div class="callout callout-blue">
+  <strong>channel_server</strong>（MCP 服务器）<br>
+  CC 启动时自动加载它（通过 <code>.mcp.json</code> 配置）。它是一个独立进程，通过 stdin/stdout 跟 CC 通信（JSON-RPC 协议）。
+  同时它开了一个 HTTP 端口接收外部消息。<br><br>
+  当你发 inject 请求，它收到后通过 stdio 发一条 MCP notification 给 CC。CC 就看到注入的消息了。
+</div>
+
+<div class="callout callout-blue">
+  <strong>BridgeHub</strong>（中心路由）<br>
+  管理所有 session 的端口映射。你只需要 <code>inject(session_id, "消息")</code>，BridgeHub 知道这个 session 对应的 channel_server 在哪个端口，帮你转发。
+</div>
+
+<h3>怎么用</h3>
+
+<pre><code><span class="kw">from</span> claude_pty <span class="kw">import</span> SessionPool, BridgeHub
+
+<span class="cm"># 1. 启动 BridgeHub</span>
+bridge = <span class="fn">BridgeHub</span>(port=<span class="num">18000</span>)
+bridge.<span class="fn">start</span>()
+
+<span class="cm"># 2. 创建 session，开启 channels</span>
+pool = <span class="fn">SessionPool</span>(bridge=bridge)
+session = <span class="kw">await</span> pool.<span class="fn">get_or_create</span>(<span class="str">"task-1"</span>, <span class="str">"/project"</span>, channels=<span class="cls">True</span>)
+
+<span class="cm"># 3. 发 prompt（CC 开始执行，可能要花几分钟）</span>
+<span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(<span class="str">"重构整个用户模块"</span>):
+    <span class="fn">print</span>(event)
+    <span class="cm"># 在 CC 执行期间，你可以随时注入消息：</span>
+    <span class="kw">if</span> need_to_change_requirement:
+        <span class="kw">await</span> session.<span class="fn">inject</span>(<span class="str">"需求更新：还需要支持 OAuth 登录"</span>)</code></pre>
+
+<div class="callout">
+  <strong>不需要 Channels 的场景：</strong>
+  CCM 现有的 agent 通信就是简单的优先级队列 + resume 模式——A agent 说完了，消息入队，B agent 下次执行时读取。
+  这种 "轮流说话" 的模式用普通的 <code>send_prompt</code> 就够了，不需要 Channels。
+  <br><br>
+  <strong>需要 Channels 的场景：</strong>
+  CC 正在执行一个长任务（比如重构 20 个文件），执行到一半你想告诉它 "停下来，需求变了"。
+  或者多租户平台，需要给运行中的 CC 推送实时消息。
+</div>
+</section>
+
+<!-- ========================================================== -->
+<section id="s7">
+<h2>7. 权限中继：程序化控制工具执行</h2>
+
+<p>CC 执行工具（读文件、写文件、运行命令）前需要权限。在终端里这是交互式的弹窗，人类点 "Allow"。
+在程序里，通常用 <code>--dangerously-skip-permissions</code> 全部放行。</p>
+
+<p>但如果你想<strong>精细控制</strong>呢？比如 "允许读文件，但禁止写文件" 或 "禁止运行危险命令"。
+这就是权限中继——通过 Channels MCP，CC 每次要用工具时先问你的程序，你的程序自动决定。</p>
+
+<ol class="steps">
+  <li class="step">
+    <div class="step-n">1</div>
+    <div class="step-body">
+      <strong>CC 要用工具（比如 Edit 文件）</strong>
+      <span>CC 通过 stdio 发 <code>permission_request</code> 给 channel_server，包含工具名、描述、输入预览</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">2</div>
+    <div class="step-body">
+      <strong>channel_server 转发给 BridgeHub</strong>
+      <span>HTTP POST，带上 session_id、request_id、tool_name</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">3</div>
+    <div class="step-body">
+      <strong>BridgeHub 调用你注册的回调函数</strong>
+      <span>你的代码根据规则判断 allow 或 deny，然后调用 <code>resolve_permission()</code></span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">4</div>
+    <div class="step-body">
+      <strong>决定传回 CC</strong>
+      <span>BridgeHub → channel_server → CC。CC 收到 allow 就继续执行工具，收到 deny 就跳过。超时 120 秒默认 deny。</span>
+    </div>
+  </li>
+</ol>
+
+<pre><code><span class="cm"># 示例：只允许读操作，禁止写操作</span>
+<span class="kw">def</span> <span class="fn">handle_permission</span>(session_id, request):
+    tool = request[<span class="str">"tool_name"</span>]
+    <span class="kw">if</span> tool <span class="kw">in</span> (<span class="str">"Read"</span>, <span class="str">"Bash"</span>, <span class="str">"Grep"</span>):
+        bridge.<span class="fn">resolve_permission</span>(session_id, request[<span class="str">"request_id"</span>], <span class="str">"allow"</span>)
+    <span class="kw">else</span>:
+        bridge.<span class="fn">resolve_permission</span>(session_id, request[<span class="str">"request_id"</span>], <span class="str">"deny"</span>)
+
+bridge.<span class="fn">on_permission_request</span>(handle_permission)</code></pre>
+
+<div class="callout">
+  <strong>大多数场景不需要用这个。</strong>
+  自动化场景（CCM 等）直接 <code>--dangerously-skip-permissions</code> 全部放行就行。
+  权限中继更适合多租户平台、沙箱环境、审计需求等场景。
+  它是框架提供的能力，但不强制使用。
+</div>
+</section>
+
+<!-- ========================================================== -->
+<section id="s8">
+<h2>8. 崩溃恢复</h2>
+
+<p>CC 进程可能因为各种原因崩溃（OOM、网络断开、内部错误）。框架的恢复流程：</p>
+
+<ol class="steps">
+  <li class="step">
+    <div class="step-n">1</div>
+    <div class="step-body">
+      <strong>drain 线程检测到进程死亡</strong>
+      <span>读 master_fd 时收到 EIO/EOF 错误，说明子进程已退出。设置 <code>_child_dead</code> 标志。</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">2</div>
+    <div class="step-body">
+      <strong>如果正在执行 send_prompt，yield 一个 SESSION_CRASHED 事件</strong>
+      <span>你的代码可以捕获这个事件做日志、告警等。</span>
+    </div>
+  </li>
+  <li class="step">
+    <div class="step-n">3</div>
+    <div class="step-body">
+      <strong>下次调用 send_prompt 时，自动重启</strong>
+      <span>指数退避等待（2 秒、4 秒、8 秒），然后用 <code>claude --resume {session_id}</code> 重新启动进程。
+      <code>--resume</code> 会恢复之前的对话上下文，CC 继续之前的工作。最多重试 3 次。</span>
+    </div>
+  </li>
+</ol>
+
+<div class="diagram"><span class="d-muted">正常运行中...</span>
+
+  CC 进程: <span class="d-red">突然崩溃（exit code 1）</span>
+           │
+  drain:   os.read() → <span class="d-red">EIO 错误</span> → 设置 _child_dead
+           │
+  session: 检测到 is_alive == False
+           ├── <span class="d-orange">yield PTYEvent(SESSION_CRASHED)</span>
+           │
+  <span class="d-muted">...你的代码继续运行，下次 send_prompt 时...</span>
+           │
+  session: <span class="d-green">_auto_resume()</span>
+           ├── 等 2 秒（指数退避）
+           ├── 启动新进程: claude --resume {session_id}
+           ├── CC 恢复之前的对话上下文
+           └── <span class="d-green">继续工作</span></div>
+</section>
+
+<!-- ========================================================== -->
+<section id="s9">
+<h2>9. 代码示例</h2>
+
+<h3>最简用法：发一条 prompt</h3>
+<pre><code><span class="kw">from</span> claude_pty <span class="kw">import</span> Session, PTYConfig
+
+session = <span class="fn">Session</span>(cwd=<span class="str">"/path/to/project"</span>)
+<span class="kw">await</span> session.<span class="fn">start</span>()
+
+<span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(<span class="str">"帮我写一个 hello world"</span>):
+    <span class="fn">print</span>(event.event_type, event.content)
+
+<span class="kw">await</span> session.<span class="fn">stop</span>()</code></pre>
+
+<h3>多 session 并发（CCM 场景）</h3>
+<pre><code><span class="kw">from</span> claude_pty <span class="kw">import</span> SessionPool, PTYConfig
+
+pool = <span class="fn">SessionPool</span>(config=<span class="fn">PTYConfig</span>(max_sessions=<span class="num">10</span>))
+
+<span class="cm"># 每个 task 自己的 session</span>
+<span class="kw">async def</span> <span class="fn">run_task</span>(task_id, prompt, cwd):
+    session = <span class="kw">await</span> pool.<span class="fn">get_or_create</span>(task_id, cwd)
+    <span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(prompt):
+        <span class="kw">await</span> <span class="fn">save_to_db</span>(task_id, event.<span class="fn">to_dict</span>())
+
+<span class="cm"># 并发跑多个 task</span>
+<span class="kw">await</span> asyncio.<span class="fn">gather</span>(
+    <span class="fn">run_task</span>(<span class="str">"task-1"</span>, <span class="str">"实现登录"</span>, <span class="str">"/project"</span>),
+    <span class="fn">run_task</span>(<span class="str">"task-2"</span>, <span class="str">"写测试"</span>, <span class="str">"/project"</span>),
+)
+
+<span class="kw">await</span> pool.<span class="fn">stop_all</span>()</code></pre>
+
+<h3>Channels + 权限控制</h3>
+<pre><code><span class="kw">from</span> claude_pty <span class="kw">import</span> SessionPool, BridgeHub
+
+bridge = <span class="fn">BridgeHub</span>(port=<span class="num">18000</span>)
+bridge.<span class="fn">start</span>()
+
+<span class="cm"># CC 调用工具时，自动允许读操作，禁止写操作</span>
+bridge.<span class="fn">on_permission_request</span>(<span class="kw">lambda</span> sid, req:
+    bridge.<span class="fn">resolve_permission</span>(sid, req[<span class="str">"request_id"</span>],
+        <span class="str">"allow"</span> <span class="kw">if</span> req[<span class="str">"tool_name"</span>] <span class="kw">in</span> (<span class="str">"Read"</span>, <span class="str">"Bash"</span>) <span class="kw">else</span> <span class="str">"deny"</span>)
+)
+
+<span class="cm"># CC 主动发消息给我们时</span>
+bridge.<span class="fn">on_reply</span>(<span class="kw">lambda</span> sid, text: <span class="fn">print</span>(<span class="str">f"CC says: {text}"</span>))
+
+pool = <span class="fn">SessionPool</span>(bridge=bridge)
+session = <span class="kw">await</span> pool.<span class="fn">get_or_create</span>(<span class="str">"task-1"</span>, <span class="str">"/project"</span>, channels=<span class="cls">True</span>)
+
+<span class="cm"># 正常发 prompt</span>
+<span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(<span class="str">"分析一下代码"</span>):
+    <span class="fn">print</span>(event)
+
+<span class="cm"># 在 CC 执行中途注入消息</span>
+<span class="kw">await</span> session.<span class="fn">inject</span>(<span class="str">"补充：重点看 auth 模块"</span>)</code></pre>
+
+<h3>CCM 集成适配器（CCM 侧代码）</h3>
+<pre><code><span class="cm"># CCM 只需写一个适配器，现有的 _process_event 不用任何改动</span>
+<span class="kw">from</span> claude_pty <span class="kw">import</span> SessionPool
+
+<span class="kw">class</span> <span class="cls">PTYAdapter</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, pool: SessionPool):
+        self.pool = pool
+
+    <span class="kw">async def</span> <span class="fn">send_prompt</span>(self, task_id, instance_id, session_id, prompt, cwd):
+        session = <span class="kw">await</span> self.pool.<span class="fn">get_or_create</span>(session_id, cwd=cwd)
+        <span class="kw">async for</span> event <span class="kw">in</span> session.<span class="fn">send_prompt</span>(prompt):
+            <span class="cm"># event.to_dict() 输出格式 == StreamParser.parse_line() 输出格式</span>
+            <span class="kw">await</span> self.<span class="fn">_process_event</span>(instance_id, task_id, event.<span class="fn">to_dict</span>())</code></pre>
+</section>
+
+<!-- ========================================================== -->
+<section id="s10">
+<h2>10. 项目概览</h2>
+
+<table>
+  <thead><tr><th>文件</th><th>行数</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><code>pty_process.py</code></td><td>258</td><td>Layer 1 — PTY 进程创建、drain 线程、逐字符输入、停止</td></tr>
+    <tr><td><code>jsonl_reader.py</code></td><td>332</td><td>Layer 2 — 读 JSONL 文件、行缓冲、事件标准化</td></tr>
+    <tr><td><code>session.py</code></td><td>269</td><td>Layer 3 — 组合 L1+L2，send_prompt 异步生成器，崩溃恢复</td></tr>
+    <tr><td><code>pool.py</code></td><td>134</td><td>Layer 4 — LRU 会话池，淘汰策略</td></tr>
+    <tr><td><code>channel_server.py</code></td><td>356</td><td>MCP 服务器 — stdio JSON-RPC + HTTP 注入端点 + 权限中继</td></tr>
+    <tr><td><code>bridge.py</code></td><td>176</td><td>消息路由中心 — 管理 session↔port 映射，转发 inject/reply/permission</td></tr>
+    <tr><td><code>config.py</code></td><td>31</td><td>PTYConfig 配置项</td></tr>
+    <tr><td><code>events.py</code></td><td>58</td><td>PTYEvent + EventType，兼容 CCM StreamParser</td></tr>
+    <tr><td><code>_env.py</code></td><td>31</td><td>环境变量清洗</td></tr>
+    <tr><td><code>exceptions.py</code></td><td>18</td><td>异常层级</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead><tr><th>指标</th><th>数值</th></tr></thead>
+  <tbody>
+    <tr><td>总代码行数</td><td>~1,700 行（框架） + ~300 行（测试）</td></tr>
+    <tr><td>外部依赖</td><td>0（纯 Python 标准库）</td></tr>
+    <tr><td>Python 版本要求</td><td>3.11+</td></tr>
+    <tr><td>安装方式</td><td><code>pip install -e .</code></td></tr>
+    <tr><td>测试</td><td>72 个（67 单元 + 5 集成，全部通过）</td></tr>
+  </tbody>
+</table>
+
+</section>
+
+</div>
+
+<div class="footer">
+  <p>
+    <strong>claude-pty</strong> · v0.1.0 ·
+    <a href="https://github.com/zjw49246/Claude-Code-PTY" target="_blank">GitHub</a>
+    · 2026-06-10
+  </p>
+</div>
+
+</body>
+</html>
