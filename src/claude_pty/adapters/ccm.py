@@ -46,6 +46,9 @@ class _PTYProcessProxy:
     def kill(self):
         pass
 
+    def terminate(self):
+        pass
+
     def send_signal(self, sig):
         pass
 
@@ -97,11 +100,86 @@ class CCMBackend(BasePTYBackend):
 
     async def on_exit(self, key: Any, exit_code: int | None, **context) -> None:
         instance_id = key
+        chat_initiated = context.get("chat_initiated", False)
+        task_id = context.get("task_id")
+
+        # For chat-initiated runs, replicate _consume_output() status management
+        if chat_initiated and task_id and instance_id not in self._im._stopping:
+            from sqlalchemy import update
+            from datetime import datetime
+            from backend.models.instance import Instance
+            from backend.models.task import Task
+
+            ec = exit_code if exit_code is not None else 0
+
+            # Pool rotation for rate-limited chat runs
+            if ec not in (0, -2, 130):
+                try:
+                    rotated = await self._im._try_chat_pool_rotation(
+                        instance_id, task_id, ec, ""
+                    )
+                    if rotated:
+                        proxy = self._proxies.pop(instance_id, None)
+                        if proxy:
+                            proxy.complete(ec)
+                        self._sessions.pop(instance_id, None)
+                        self._consumers.pop(instance_id, None)
+                        return
+                except Exception:
+                    logger.exception("Pool rotation check failed for instance %s", instance_id)
+
+            interrupted = ec in (-2, 130)
+            new_status = "idle" if (ec == 0 or interrupted) else "error"
+
+            async with self._im.db_factory() as db:
+                await db.execute(
+                    update(Instance).where(Instance.id == instance_id).values(
+                        status=new_status, pid=None, current_task_id=None,
+                    )
+                )
+                chat_active_statuses = ["executing", "in_progress", "failed", "pending"]
+                if ec == 0 or interrupted:
+                    result = await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
+                        .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
+                    )
+                    if result.rowcount:
+                        await self._im.broadcaster.broadcast("tasks", {
+                            "event": "status_change",
+                            "task_id": task_id,
+                            "new_status": "completed",
+                            "instance_id": instance_id,
+                        })
+                else:
+                    result = await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
+                        .values(status="failed", error_message=f"Process exited with code {ec}")
+                    )
+                    if result.rowcount:
+                        await self._im.broadcaster.broadcast("tasks", {
+                            "event": "status_change",
+                            "task_id": task_id,
+                            "new_status": "failed",
+                            "instance_id": instance_id,
+                        })
+                await db.commit()
+
+            # Broadcast process exit
+            await self._im.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "process_exit",
+                "exit_code": ec,
+                "stderr": None,
+            })
+
         proxy = self._proxies.pop(instance_id, None)
         if proxy:
             proxy.complete(exit_code)
         self._sessions.pop(instance_id, None)
         self._consumers.pop(instance_id, None)
+        self._im.processes.pop(instance_id, None)
+        self._im._tasks.pop(instance_id, None)
 
     async def launch_for_ccm(
         self,
@@ -135,6 +213,19 @@ class CCMBackend(BasePTYBackend):
 
         if config_dir:
             self._im._config_dirs[instance_id] = config_dir
+
+        # Stop existing session before resume to avoid dual-process conflict
+        old_session = self._sessions.get(instance_id)
+        if old_session:
+            logger.info("Stopping existing PTY session for instance %s before resume", instance_id)
+            try:
+                await old_session.stop()
+            except Exception:
+                logger.exception("Failed to stop old session for instance %s", instance_id)
+            self._sessions.pop(instance_id, None)
+            old_consumer = self._consumers.pop(instance_id, None)
+            if old_consumer and not old_consumer.done():
+                old_consumer.cancel()
 
         proxy = _PTYProcessProxy()
         self._proxies[instance_id] = proxy

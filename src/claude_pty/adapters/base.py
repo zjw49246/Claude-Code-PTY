@@ -62,6 +62,15 @@ class BasePTYBackend:
             config_override=config,
         )
         self._sessions[key] = session
+
+        # Re-key pool entry if the actual session_id differs from the lookup key
+        actual_sid = session.session_id
+        if actual_sid and actual_sid != (sid or ""):
+            async with self._pool._lock:
+                self._pool._sessions.pop(sid or "", None)
+                self._pool._sessions[actual_sid] = session
+                self._pool._access_order[actual_sid] = self._pool._access_order.pop(sid or "", 0)
+
         self._launch_params[key] = {"prompt": prompt, "cwd": cwd, **kwargs}
 
         logger.info("PTY session created: key=%s session_id=%s alive=%s", key, session.session_id, session.is_alive)
