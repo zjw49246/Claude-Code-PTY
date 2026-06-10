@@ -267,6 +267,7 @@ USE_PTY_MODE=true AUTH_TOKEN=... uvicorn backend.main:app --port 8003
 | **号池撞限自动换号**（最高优先） | 基础设施就绪但**检测缺失**：交互模式撞限不退进程，表现为超时而非 rotation | 扫 PTY 输出 usage-limit 标志（Teleos stderr-ring 玩法）→ 调 `migrate_and_relaunch()` |
 | cost 统计 | 无 result 事件，`total_cost_usd` 不更新 | 从各 assistant 消息 usage 累加 |
 | 任务级完成信号 | 依赖 turn_duration（回合级） | `ccm_done(summary)` MCP tool（学 teleos_done） |
+| ~~thinking 不可见~~ | **已解决（2026-06-10）**：账号 settings.json 加 `showThinkingSummaries: true` 后，JSONL thinking 块带明文，normalize 直接提取，无需代码改动 | — |
 | 崩溃分类 | 统一 `--resume` 重试 | 区分 auth 过期/binary 缺失（不重试）vs 运行期崩溃；stderr 环形缓冲诊断 |
 | typing/idle 信号 | drain loop 已记录 `_last_output` | 暴露给 CCM 做前端 typing indicator |
 | `.mcp.json` 写入用户 cwd | 有污染风险 | 改临时目录 + `--mcp-config`，或 stop 时清理 |

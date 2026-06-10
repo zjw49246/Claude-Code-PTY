@@ -154,7 +154,7 @@
 
 <h3>3.4 回合结束：turn_duration 哨兵</h3>
 <pre><code>{"type":"system","subtype":"turn_duration","durationMs":3348}   ← 每 turn 恰一条，在所有消息之后</code></pre>
-<div class="card bad"><b>为什么不用 stop_reason=end_turn</b>：同一 turn 的 thinking 块和 text 块各占一行 JSONL、都带 end_turn，按它判断会提前截断丢失尾部消息。注意交互模式<b>没有 result 事件</b>（那是 -p 专属）。</div>
+<div class="card bad"><b>为什么不用 stop_reason=end_turn</b>：同一 turn 的 thinking 块和 text 块各占一行 JSONL、都带 end_turn，按它判断会提前截断丢失尾部消息。注意交互模式<b>没有 result 事件</b>（那是 -p 专属）。thinking 明文需账号 settings 开 <code>showThinkingSummaries</code>。</div>
 
 <h3>3.5 会话生命周期</h3>
 <table>
@@ -231,6 +231,7 @@ AUTH_TOKEN=... USE_PTY_MODE=true uvicorn backend.main:app --port 8003</code></pr
   <tr><td>任务级完成信号</td><td>仅回合级（turn_duration）</td><td>ccm_done(summary) MCP tool</td></tr>
   <tr><td>崩溃分类</td><td>统一 --resume 重试</td><td>auth 过期/binary 缺失不重试；stderr 环形缓冲诊断</td></tr>
   <tr><td>typing 信号</td><td>_last_output 已记录</td><td>暴露给前端 typing indicator</td></tr>
+  <tr><td>thinking 可见性</td><td><b style="color:var(--green)">已解决</b>：账号 settings.json 加 <code>showThinkingSummaries: true</code> 后 JSONL 带明文，normalize 直接提取</td><td>—</td></tr>
 </table>
 
 <h2 id="index">7. 代码索引</h2>
