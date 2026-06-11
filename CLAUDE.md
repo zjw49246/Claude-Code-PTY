@@ -15,6 +15,19 @@
 
 历史教训见 PROGRESS.md，待办见 TODO.md。
 
+## 下游依赖（重要）
+
+本仓库（claude-pty）有两个下游，均以 git rev pin 在各自 uv.lock：
+
+- **elastic-agent**：`[pty]` extra → 下游 harness（audio_book_echo_agent）再 pin elastic-agent
+- **CCM**（Claude-Code-Manager）：直接 git 依赖
+
+**git 依赖不会自动浮动**——本仓库合入 main 后，若改动涉及对外接口/行为（adapters、events、协议），任务完成前必须级联：
+1. elastic-agent：`uv lock --upgrade-package claude-pty && uv sync`，提交 push（其下游再 bump elastic-agent）
+2. CCM：`uv lock --upgrade-package claude-pty && uv sync`；生产重启走 `systemctl --user restart ccm-b`（需用户确认时机）
+
+纯内部改动可不级联，但要在 commit message 注明。
+
 ## Git 信息
 
 - Remote: origin → https://github.com/zjw49246/Claude-Code-PTY.git
