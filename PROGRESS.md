@@ -8,7 +8,7 @@
 - **根因**：`-p` 模式从不显示全局 onboarding，所以纯 headless 用过的 config_dir 的 `.claude.json` 没有 `hasCompletedOnboarding`；首次交互模式（PTY）必弹 theme picker。pretrust 只写了 projects trust 条目，drain 的 "Entertoconfirm" 匹配不到这个对话框文案。
 - **解决**：`_pretrust_workdir` 顺带 setdefault 顶层 `hasCompletedOnboarding: true` + `theme: "dark"`（已有用户选择不覆盖）。
 - **教训**：交互模式与 headless 模式的启动路径差异要逐个对话框排查；"进程活着但 JSONL 不出现" = 卡 TUI 对话框的标志性症状，诊断手段是 `script -qec` 复现 + 剥 ANSI 看屏幕。
-- **Commit**: 本节合入 main 的 commit。
+- **Commit**: eee68a5
 
 ## 2026-06-11 同机多宿主注入串话（task-inject-isolation）
 
