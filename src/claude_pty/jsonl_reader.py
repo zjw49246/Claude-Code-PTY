@@ -127,7 +127,13 @@ class JsonlReader:
             return self._normalize_result(raw, raw_json, now, session_id)
 
         if msg_type == "assistant":
-            return self._normalize_assistant(message, raw_json, now, session_id)
+            events = self._normalize_assistant(message, raw_json, now, session_id)
+            # CC records upstream API failures (e.g. usage-policy rejections)
+            # as a synthetic assistant message; the turn is aborted after it.
+            if raw.get("isApiErrorMessage"):
+                for event in events:
+                    event.is_error = True
+            return events
 
         if msg_type == "user":
             return self._normalize_user(message, raw_json, now, session_id)

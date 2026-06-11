@@ -159,13 +159,18 @@ class Session:
     _INJECT_ATTEMPTS = 5
     _INJECT_RETRY_INTERVAL = 1.0
 
-    async def _deliver_prompt(self, text: str) -> None:
+    async def _deliver_prompt(self, text: str) -> str:
         """Deliver a prompt to CC: channel injection first, stdin fallback.
 
         Channel injection (an MCP notification) is the preferred path — it
         bypasses the TUI input layer entirely, so prompt content can never
         interact with keybindings, slash-command completion, or paste
         handling. Verified to wake an idle session into a new turn.
+
+        Returns the delivery method: "channel" or "stdin". A "channel" result
+        only means the notification reached the channel server (HTTP 200) —
+        CC may still drop it (e.g. while booting), so the caller must confirm
+        the turn actually started via JSONL activity.
         """
         loop = asyncio.get_running_loop()
 
@@ -179,7 +184,7 @@ class Session:
                         "Session %s: prompt delivered via channel (%d chars)",
                         self.session_id, len(text),
                     )
-                    return
+                    return "channel"
                 if attempt < self._INJECT_ATTEMPTS:
                     await asyncio.sleep(self._INJECT_RETRY_INTERVAL)
             logger.warning(
@@ -193,6 +198,7 @@ class Session:
             self.session_id, len(text),
         )
         await loop.run_in_executor(None, self._process.send_prompt, text)
+        return "stdin"
 
     async def _send_prompt_inner(
         self,
@@ -212,14 +218,25 @@ class Session:
         if self._pending_prompt and self._pending_prompt == text:
             logger.info("Session %s: prompt already sent during start, skipping re-send", self.session_id)
             self._pending_prompt = None
+            delivery = "channel"
         else:
             self._pending_prompt = None
-            await self._deliver_prompt(text)
+            delivery = await self._deliver_prompt(text)
         self._last_activity = time.monotonic()
 
         deadline = time.monotonic() + timeout
         response_complete = False
         self._rate_limited_turn = False
+        api_error_turn = False
+        # Channel inject "success" is no proof CC consumed the notification
+        # (observed in production: inject 13ms after a resume spawn was
+        # silently dropped — message blackholed for 30 min). Confirm the turn
+        # started via JSONL activity; otherwise re-send once via stdin.
+        confirm_deadline = (
+            time.monotonic() + self.config.inject_confirm_timeout
+            if delivery == "channel"
+            else None
+        )
 
         while not response_complete and time.monotonic() < deadline:
             if not self._process.is_alive:
@@ -234,6 +251,8 @@ class Session:
             messages = await loop.run_in_executor(
                 None, self._reader.read_new_messages
             )
+            if messages:
+                confirm_deadline = None  # turn started — delivery confirmed
 
             for raw in messages:
                 if (
@@ -241,6 +260,8 @@ class Session:
                     or raw.get("error") == "rate_limit"
                 ):
                     self._rate_limited_turn = True
+                if raw.get("isApiErrorMessage"):
+                    api_error_turn = True
                 for event in self._reader.normalize(raw):
                     self._last_activity = time.monotonic()
                     yield event
@@ -248,6 +269,35 @@ class Session:
                 if self._reader.is_response_complete(raw):
                     response_complete = True
                     break
+
+            # An API error aborts the turn server-side: CC writes the error
+            # message but never a turn_duration sentinel. End the turn as an
+            # error instead of hanging until response_timeout.
+            if not response_complete and api_error_turn:
+                yield PTYEvent(
+                    event_type=EventType.SYSTEM_EVENT,
+                    content=(
+                        "api_error: turn aborted by API error "
+                        "(no turn_duration sentinel follows)"
+                    ),
+                    is_error=True,
+                    session_id=self.session_id,
+                )
+                break
+
+            if (
+                confirm_deadline is not None
+                and time.monotonic() > confirm_deadline
+            ):
+                confirm_deadline = None  # fall back at most once
+                logger.warning(
+                    "Session %s: no JSONL activity %.0fs after channel "
+                    "inject, re-sending prompt via PTY stdin",
+                    self.session_id, self.config.inject_confirm_timeout,
+                )
+                await loop.run_in_executor(
+                    None, self._process.send_prompt, text
+                )
 
             # PTY banner scan (drain loop) — end the turn as an error so the
             # host can rotate accounts instead of waiting out the timeout.

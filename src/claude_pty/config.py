@@ -17,6 +17,10 @@ class PTYConfig:
     post_response_wait: float = 3.0
     response_timeout: float = 1800.0
     jsonl_poll_interval: float = 0.3
+    # Channel inject has no delivery ACK from CC (HTTP 200 only means the
+    # notification reached the channel server). If no JSONL activity appears
+    # within this window, the prompt is re-sent via PTY stdin.
+    inject_confirm_timeout: float = 15.0
 
     max_sessions: int = 20
     idle_timeout: float = 300.0

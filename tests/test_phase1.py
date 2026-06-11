@@ -451,3 +451,180 @@ class TestRateLimitDetection:
         assert s2 is not s1
         assert s1.stopped is True
         assert len(created) == 2
+
+
+class TestApiErrorTurnAbort:
+    """isApiErrorMessage: API 掐断 turn 时不会有 turn_duration 哨兵。
+
+    生产实录（task 80, session 29106cf4）：turn 中途 API 返回 Usage Policy
+    错误，JSONL 最后一条是 isApiErrorMessage=true 的 assistant 消息，之后
+    再无输出 —— 轮询层若只等哨兵就会静默挂到 response_timeout。
+    """
+
+    def test_normalize_marks_api_error_as_error(self):
+        from claude_pty.events import EventType
+
+        reader = JsonlReader("/nonexistent")
+        events = reader.normalize({
+            "type": "assistant",
+            "isApiErrorMessage": True,
+            "message": {"content": [{"type": "text",
+                                     "text": "API Error: Usage Policy"}]},
+        })
+        assert len(events) == 1
+        assert events[0].event_type == EventType.MESSAGE
+        assert events[0].is_error is True
+
+    async def test_session_ends_turn_on_api_error(self):
+        from claude_pty.session import Session
+        from claude_pty.events import EventType
+
+        session = Session(cwd="/w", session_id="sid-ae",
+                          config=PTYConfig(response_timeout=10,
+                                           post_response_wait=0,
+                                           jsonl_poll_interval=0.01))
+
+        class FakeReader:
+            sent = False
+
+            def read_new_messages(self):
+                if not self.sent:
+                    self.sent = True
+                    return [{
+                        "type": "assistant",
+                        "isApiErrorMessage": True,
+                        "message": {"content": [{"type": "text",
+                                                 "text": "API Error: x"}]},
+                    }]
+                return []
+
+            def normalize(self, raw):
+                return []
+
+            def is_response_complete(self, raw):
+                return False
+
+        class FakeProc:
+            session_id = "sid-ae"
+            is_alive = True
+            exit_code = None
+            rate_limited = False
+
+            def send_prompt(self, text):
+                pass
+
+        session._process = FakeProc()
+        session._reader = FakeReader()
+        session._started = True
+
+        events = []
+        async for ev in session.send_prompt("hello"):
+            events.append(ev)
+        # turn 以 api_error 错误事件提前结束，而不是等到 response_timeout
+        assert any(ev.is_error and "api_error" in (ev.content or "")
+                   for ev in events)
+        assert not any("timed out" in (ev.content or "") for ev in events)
+
+
+class TestInjectDeliveryConfirm:
+    """channel 注入“成功”≠ CC 真的收到了。
+
+    生产实录（task 80, 04:47）：resume spawn 后 13ms 注入返回 HTTP 200，
+    但 CC 仍在初始化，notification 被丢弃 —— JSONL 永远没有 user 事件，
+    消息黑洞 30 分钟。修复：注入后 N 秒内 JSONL 无任何活动 → stdin 重投。
+    """
+
+    def _make_session(self, reader, proc, bridge):
+        from claude_pty.session import Session
+
+        session = Session(cwd="/w", session_id=proc.session_id,
+                          config=PTYConfig(response_timeout=10,
+                                           post_response_wait=0,
+                                           jsonl_poll_interval=0.01,
+                                           inject_confirm_timeout=0.05),
+                          bridge=bridge, channel_inject_port=12345)
+        session._process = proc
+        session._reader = reader
+        session._started = True
+        return session
+
+    async def test_fallback_to_stdin_when_no_jsonl_activity(self):
+        stdin_calls = []
+
+        class FakeReader:
+            unblocked = False
+
+            def read_new_messages(self):
+                if self.unblocked:
+                    return [{"type": "system", "subtype": "turn_duration"}]
+                return []
+
+            def normalize(self, raw):
+                return []
+
+            def is_response_complete(self, raw):
+                return raw.get("subtype") == "turn_duration"
+
+        reader = FakeReader()
+
+        class FakeProc:
+            session_id = "sid-ic"
+            is_alive = True
+            exit_code = None
+            rate_limited = False
+
+            def send_prompt(self, text):
+                stdin_calls.append(text)
+                reader.unblocked = True
+
+        class FakeBridge:
+            def inject(self, session_id, content, meta=None):
+                return True  # HTTP 200 — 但 CC 实际丢弃了
+
+        session = self._make_session(reader, FakeProc(), FakeBridge())
+        events = []
+        async for ev in session.send_prompt("hello"):
+            events.append(ev)
+
+        assert stdin_calls == ["hello"]
+        assert not any(ev.is_error for ev in events)
+
+    async def test_no_fallback_when_turn_starts(self):
+        stdin_calls = []
+
+        class FakeReader:
+            step = 0
+
+            def read_new_messages(self):
+                self.step += 1
+                if self.step == 1:
+                    return [{"type": "user",
+                             "message": {"content": "hello"}}]
+                if self.step == 2:
+                    return [{"type": "system", "subtype": "turn_duration"}]
+                return []
+
+            def normalize(self, raw):
+                return []
+
+            def is_response_complete(self, raw):
+                return raw.get("subtype") == "turn_duration"
+
+        class FakeProc:
+            session_id = "sid-ok"
+            is_alive = True
+            exit_code = None
+            rate_limited = False
+
+            def send_prompt(self, text):
+                stdin_calls.append(text)
+
+        class FakeBridge:
+            def inject(self, session_id, content, meta=None):
+                return True
+
+        session = self._make_session(FakeReader(), FakeProc(), FakeBridge())
+        async for _ in session.send_prompt("hello"):
+            pass
+
+        assert stdin_calls == []  # turn 已启动，不应 stdin 重投
