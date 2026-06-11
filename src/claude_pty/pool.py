@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import time
 
 from .config import PTYConfig
@@ -25,7 +26,20 @@ class SessionPool:
         self._sessions: dict[str, Session] = {}
         self._access_order: dict[str, float] = {}
         self._lock = asyncio.Lock()
-        self._next_inject_port = 19100
+
+    @staticmethod
+    def _allocate_inject_port() -> int:
+        """Pick a free port for a session's channel server.
+
+        A fixed base counter (the old `19100 + n` scheme) collides across
+        host processes on the same machine: two pools both hand out 19100,
+        and injection cross-talks into a foreign session. Let the OS pick a
+        free ephemeral port instead. The remaining close-to-bind race is
+        covered by the channel server's session_id check on /inject.
+        """
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
 
     async def get_or_create(
         self,
@@ -68,8 +82,7 @@ class SessionPool:
             inject_port = None
             bridge = None
             if channels and self.bridge:
-                inject_port = self._next_inject_port
-                self._next_inject_port += 1
+                inject_port = self._allocate_inject_port()
                 bridge = self.bridge
             session = Session(
                 cwd=cwd,

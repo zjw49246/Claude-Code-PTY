@@ -248,7 +248,16 @@ class _InjectHandler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length)) if length else {}
             content = body.get("content", "")
             meta = body.get("meta")
-            if content:
+            target = body.get("session_id")
+            # Reject deliveries addressed to another session: a colliding or
+            # reused inject port must not leak messages into this
+            # conversation. (Requests without session_id are accepted for
+            # backward compatibility with older hosts.)
+            if target and _session_id and target != _session_id:
+                self.send_response(409)
+                self.end_headers()
+                self.wfile.write(b'{"error":"session mismatch"}')
+            elif content:
                 _send_notification(content, meta)
                 self.send_response(200)
                 self.end_headers()
@@ -282,8 +291,19 @@ class _InjectHandler(BaseHTTPRequestHandler):
         pass  # Suppress HTTP logs (would pollute stderr)
 
 
-def _run_inject_server(port: int) -> HTTPServer:
-    server = HTTPServer(("127.0.0.1", port), _InjectHandler)
+def _run_inject_server(port: int) -> HTTPServer | None:
+    try:
+        server = HTTPServer(("127.0.0.1", port), _InjectHandler)
+    except OSError as exc:
+        # Port taken (collision with another session's channel server).
+        # Don't kill the MCP server — the host falls back to stdin delivery
+        # when injection can't reach us.
+        print(
+            f"pty-bridge: inject port {port} unavailable ({exc}); "
+            "channel injection disabled for this session",
+            file=sys.stderr,
+        )
+        return None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server

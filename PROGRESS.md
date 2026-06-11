@@ -1,5 +1,20 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-06-11 同机多宿主注入串话（task-inject-isolation）
+
+### 问题：BridgeHub 注入打进了别人的会话
+
+- **现象**：elastic-agent 接入冒烟测试时，新宿主进程的 channel 注入直接落进了同机另一个宿主（pty-bridge）的会话上下文，且 /inject 返回 200，注入方以为成功；目标会话靠 inject_confirm_timeout + stdin fallback 兜底才完成任务。
+- **根因**（两层）：
+  1. `SessionPool._next_inject_port` 是实例级计数器、固定从 19100 起——同机两个宿主进程的第一个会话必然撞端口；
+  2. channel_server 的 `/inject` 不校验目标 session——打错端口的消息照单全收并回 200。
+- **解决**：
+  1. pool 改用 OS 分配空闲端口（bind ("127.0.0.1", 0) 取 port），消除确定性碰撞；
+  2. `BridgeHub.inject` 负载携带目标 `session_id`，channel_server 不匹配回 409（无 session_id 的旧宿主请求兼容放行）——即使端口碰撞/复用，消息也不可能漏进别的会话，注入方拿到 False 走 stdin fallback；
+  3. channel_server 端口 bind 失败不再崩整个 MCP server，仅禁用注入（stdin fallback 仍可用）。
+- **教训**：localhost 多进程间的"端口即身份"不可靠——任何跨进程投递都要带显式收件人校验；固定起始的端口计数器在单进程内看似安全，多宿主部署立即失效。回归测试要覆盖"两个宿主同机共存"的场景。
+- **Commit**: 见本节合入 main 的 commit。
+
 ## 2026-06-10 Phase 1: I/O 核心重构（commits 1f889cc, 0c64014）
 
 ### 问题 1：channels 路径整体是坏的，但没有任何测试发现

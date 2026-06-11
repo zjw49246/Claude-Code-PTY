@@ -162,7 +162,11 @@ class BridgeHub:
             return False
 
         try:
-            data = json.dumps({"content": content, "meta": meta}).encode()
+            # session_id lets the channel server reject deliveries meant for
+            # another session (inject-port collision/reuse on the same host).
+            data = json.dumps(
+                {"content": content, "meta": meta, "session_id": session_id}
+            ).encode()
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/inject",
                 data=data,
