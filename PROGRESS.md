@@ -25,3 +25,17 @@
 - **现象**：多字节 UTF-8 被按"字符"拆分发送但每字符间 sleep（中文/emoji 场景脆弱）；prompt 含 `\n` 会被 TUI 当作提交；1 万字符要 8 分钟。
 - **解决**：输入主路改 channel 注入（MCP notification，完全绕开 TUI 输入层）；stdin 仅作 fallback，且改为 bracketed-paste（`\x1b[200~...\x1b[201~`）整段写入——换行不再触发提交。
 - **教训**：PTY 适合当"宿主"（保活/中断/启动应答），不适合当消息通道；结构化输入输出都该走协议层（MCP/JSONL）。参考 Teleos（zjw49246/Agent2Agent）的生产验证。
+
+## 2026-06-11 生产 task 80 静默挂死复盘（commit b067662）
+
+### 问题 1：channel 注入"假成功"——消息黑洞 30 分钟
+
+- **现象**：用户开 PTY 发消息，日志显示 `prompt delivered via channel`（注入发生在 resume spawn "started" 后仅 13ms），但 session JSONL 永远没出现 user 事件——CC 当时仍在初始化，notification 被静默丢弃。stdin fallback 只覆盖 `inject 返回 false`，不覆盖"返回 200 但 CC 没消费"。
+- **解决**：`send_prompt` 在 channel 投递后启动确认窗口（`inject_confirm_timeout`，默认 15s）：窗口内 JSONL 出现任何新消息即视为 turn 已启动；否则 stdin 重投一次（bracketed-paste）。
+- **教训**：**跨进程投递的"成功"必须以接收方的 ground truth（JSONL）确认，发送方的 HTTP 200 不算数**。`/inject` 的 200 只意味着 notification 写进了 channel server 的 stdout 管道。
+
+### 问题 2：API 错误掐断 turn，轮询层永远等不到哨兵
+
+- **现象**：turn 进行中 API 返回 Usage Policy 拒绝，CC 写入一条 `isApiErrorMessage: true` 的 assistant 消息后 turn 终止——**不会再写 `turn_duration` 哨兵**。轮询层只认哨兵 → 静默挂到 response_timeout（30 分钟），用户侧无任何反馈。
+- **解决**：与 rate-limit 检测同类处理——session 循环检测 `isApiErrorMessage`，立即 yield 错误事件结束 turn；normalize 时对应 assistant 事件标 `is_error=True`。
+- **教训**：哨兵协议要枚举"哨兵不会来"的所有路径（rate-limit、API error、进程死亡），每条都要有主动终止信号，否则就是静默挂死。
