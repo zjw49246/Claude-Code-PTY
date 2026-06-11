@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "pty-bridge": {
+      "command": "/home/ubuntu/Claude-Code-Manager/.venv/bin/claude-pty-channel",
+      "args": [
+        "--port",
+        "19100",
+        "--session-id",
+        "29106cf4-003d-42ef-97a3-f52f16542fa3",
+        "--bridge-port",
+        "43791"
+      ]
+    }
+  }
+}

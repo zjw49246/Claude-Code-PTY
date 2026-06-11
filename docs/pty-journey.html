@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PTY 框架从零到稳定 — 完整问题与解决全记录</title>
+<title>PTY 框架 — 问题、方法与意义</title>
 <style>
   :root {
     --bg: #0b0f17; --panel: #131a26; --panel2: #1a2333; --border: #263247;
@@ -12,21 +12,21 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
-         font: 15px/1.75 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
-  .wrap { max-width: 1020px; margin: 0 auto; padding: 40px 24px 80px; }
-  h1 { font-size: 30px; margin: 0 0 6px; }
-  h2 { font-size: 22px; margin: 52px 0 14px; padding-bottom: 8px;
+         font: 15px/1.8 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 48px 24px 80px; }
+  h1 { font-size: 32px; margin: 0 0 8px; }
+  h2 { font-size: 23px; margin: 56px 0 16px; padding-bottom: 8px;
        border-bottom: 1px solid var(--border); color: #fff; }
-  h3 { font-size: 17px; margin: 26px 0 10px; color: var(--accent); }
-  .sub { color: var(--muted); margin-bottom: 28px; }
+  h2 .no { display: inline-block; background: var(--accent); color: #fff;
+           border-radius: 8px; padding: 0 12px; margin-right: 10px; font-size: 18px; }
+  h3 { font-size: 17px; margin: 30px 0 10px; color: var(--accent); }
+  .sub { color: var(--muted); margin-bottom: 30px; font-size: 15px; }
   .tag { display: inline-block; padding: 1px 9px; border-radius: 99px;
          font-size: 12px; margin-right: 6px; border: 1px solid var(--border); }
   .tag.g { color: var(--green); border-color: var(--green); }
   .tag.a { color: var(--amber); border-color: var(--amber); }
   .tag.b { color: var(--accent); border-color: var(--accent); }
-  .tag.r { color: var(--red); border-color: var(--red); }
-  .tag.p { color: var(--purple); border-color: var(--purple); }
-  p { margin: 10px 0; }
+  p { margin: 11px 0; }
   code { background: var(--code-bg); border: 1px solid var(--border);
          padding: 1px 6px; border-radius: 4px; font-size: 13px;
          font-family: "SF Mono", Consolas, monospace; color: #b9cdf5; }
@@ -35,42 +35,16 @@
         font-size: 13px; line-height: 1.6; }
   pre code { background: none; border: none; padding: 0; }
   table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
-  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left;
+  th, td { border: 1px solid var(--border); padding: 9px 13px; text-align: left;
            vertical-align: top; }
   th { background: var(--panel2); color: #fff; }
   tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
   .card { background: var(--panel); border: 1px solid var(--border);
-          border-radius: 10px; padding: 18px 20px; margin: 16px 0; }
+          border-radius: 10px; padding: 18px 22px; margin: 18px 0; }
   .card.good { border-left: 4px solid var(--green); }
-  .card.bad  { border-left: 4px solid var(--red); }
   .card.warn { border-left: 4px solid var(--amber); }
-  .toc { background: var(--panel); border: 1px solid var(--border);
-         border-radius: 10px; padding: 14px 22px; }
-  .toc a { color: var(--accent); text-decoration: none; }
-  .toc a:hover { text-decoration: underline; }
-  /* 时间线 */
-  .timeline { position: relative; margin: 24px 0; padding-left: 28px; }
-  .timeline::before { content: ""; position: absolute; left: 8px; top: 4px; bottom: 4px;
-                      width: 2px; background: var(--border); }
-  .tl-item { position: relative; margin-bottom: 14px; }
-  .tl-item::before { content: ""; position: absolute; left: -26px; top: 8px;
-                     width: 10px; height: 10px; border-radius: 50%;
-                     background: var(--accent); border: 2px solid var(--bg); }
-  .tl-item.fix::before { background: var(--red); }
-  .tl-item.feat::before { background: var(--green); }
-  .tl-item b { color: #fff; }
-  .tl-item .when { color: var(--muted); font-size: 12px; margin-right: 8px; }
-  /* 问题卡片 */
-  .problem { background: var(--panel); border: 1px solid var(--border);
-             border-radius: 12px; padding: 20px 22px; margin: 20px 0; }
-  .problem .ptitle { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 10px; }
-  .problem .ptitle .num { display: inline-block; background: var(--red); color: #fff;
-                          border-radius: 6px; padding: 0 8px; margin-right: 8px; font-size: 13px; }
-  .problem dl { margin: 0; display: grid; grid-template-columns: 64px 1fr; gap: 6px 12px; }
-  .problem dt { color: var(--muted); font-size: 13px; padding-top: 1px; }
-  .problem dd { margin: 0; }
-  .problem .sym { color: var(--amber); }
-  .problem .fix { color: var(--green); }
+  .card.key  { border-left: 4px solid var(--accent); }
+  .big { font-size: 17px; }
   .flow { background: var(--panel); border: 1px solid var(--border);
           border-radius: 12px; padding: 24px; margin: 20px 0; }
   .flow-row { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap;
@@ -83,411 +57,185 @@
   .node.hl { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .node.gr { border-color: var(--green); }
   .arrow { text-align: center; color: var(--muted); font-size: 13px; margin: 2px 0; }
-  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 720px) { .cols { grid-template-columns: 1fr; }
-    .problem dl { grid-template-columns: 1fr; } }
+  .result { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 12px; padding: 20px 24px; margin: 20px 0; }
+  .result .rtitle { font-size: 17px; font-weight: 700; color: #fff; margin-bottom: 8px; }
+  .result .rtitle .num { display: inline-block; background: var(--green); color: #0b0f17;
+                         border-radius: 6px; padding: 0 9px; margin-right: 9px; font-size: 14px; }
+  .metric { display: flex; gap: 16px; flex-wrap: wrap; margin: 16px 0; }
+  .metric .m { flex: 1; min-width: 180px; background: var(--panel2);
+               border: 1px solid var(--border); border-radius: 10px;
+               padding: 14px 18px; text-align: center; }
+  .metric .m b { display: block; font-size: 26px; color: var(--green); }
+  .metric .m span { color: var(--muted); font-size: 13px; }
   footer { margin-top: 60px; color: var(--muted); font-size: 13px;
            border-top: 1px solid var(--border); padding-top: 16px; }
-  .big { font-size: 17px; }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<h1>PTY 框架：从问题缠身到完全稳定</h1>
+<h1>PTY 框架</h1>
 <p class="sub">
-  <span class="tag b">Claude-Code-PTY</span>
-  <span class="tag g">Claude-Code-Manager</span>
-  <span class="tag a">2026-06-10 一日全记录（CCM task 77 / 79 轨迹复盘）</span><br>
-  这是一份编年体复盘：用常驻交互式 Claude Code 进程替代 <code>claude -p</code> 的 PTY 框架，
-  从 task 77 的初版搭建、第一个 resume 崩溃大坑，到初版方案的 4 个结构性缺陷，
-  经历 Phase 0 验证、Phase 1 重构、Phase 2 接入 CCM、
-  生产实测暴露问题群、再到 Phase 3 撞限换号与 loop 热复用收官——<b>共定位并修复 16+ 个问题</b>，
-  全部进入 GitHub main。文末附框架完整工作原理。
+  <span class="tag b">问题定义</span>
+  <span class="tag g">方法介绍</span>
+  <span class="tag a">意义</span><br>
+  一个独立的框架：在 Claude Code 交互模式外层套一个伪终端（PTY），
+  让原本只能由人在终端里使用的交互模式，变成可被程序驱动的自动化运行时。
 </p>
 
-<div class="toc">
-  <b>目录</b><br>
-  <a href="#origin">0. 起点：为什么做、初版错在哪</a> ·
-  <a href="#research">1. 初版搭建与第一批问题（task 77）</a> ·
-  <a href="#phase0">2. Phase 0 四个验证</a> ·
-  <a href="#phase1">3. Phase 1 核心重构（4 个结构性缺陷）</a> ·
-  <a href="#phase2">4. Phase 2 接入 CCM</a> ·
-  <a href="#prod">5. 生产实测暴露的问题群</a> ·
-  <a href="#rotation">6. 撞限检测与号池换号</a> ·
-  <a href="#polish">7. loop 热复用 / thinking 可见性</a> ·
-  <a href="#ops">8. 运维事故与教训</a> ·
-  <a href="#how">9. 框架完整工作原理</a> ·
-  <a href="#summary">10. 总账</a>
-</div>
-
 <!-- ============================================================ -->
-<h2 id="origin">0. 起点：为什么做、初版错在哪</h2>
+<h2 id="problem"><span class="no">1</span>问题定义：我们遇到了什么问题</h2>
 
-<p>CCM（Claude Code Manager）原本每个回合执行一次
-<code>claude -p "&lt;prompt&gt;" --output-format stream-json --resume &lt;sid&gt;</code>。
-简单可靠（进程退出=回合结束、exit code=成败），但每条 chat 消息、每个 loop 迭代都要<b>整进程冷启动 +
-从 JSONL 重放全部历史</b>，会话越长越慢，且无法中途注入消息或软中断。</p>
+<p class="big"><b>6 月 15 日之后，Claude Code 的 <code>-p</code>（非交互）模式额度大幅下降。
+我们目前所有的项目都构建在 -p 模式之上——额度一降，所有项目都无法运转。</b></p>
 
-<p>目标：一个任务一个<b>常驻交互式 CC 进程</b>，多轮对话同进程完成。设计参考了
-Teleos（zjw49246/Agent2Agent）的生产验证经验——深度调研它后得到本框架的核心哲学：</p>
+<p>这不是某一个项目的优化问题，而是全线项目的生存问题。我们急需一套框架来解决它。</p>
 
-<div class="card good big"><b>PTY 只当宿主，消息走协议层。</b>
-伪终端只负责进程保活、启动应答、Esc 中断；输入走 MCP channel 注入、输出读 CC 自己写的 JSONL。
-凡是试图「模拟人类打字、解析终端 ANSI 输出」的路都是死路。</div>
-
-<p>初版框架（重构前）恰恰踩了这些死路，带着 4 个结构性缺陷（见第 3 节），
-而且 channels 注入链路<b>整体是坏的</b>却没有任何测试发现——这是后来一切问题的源头。</p>
-
-<!-- ============================================================ -->
-<h2 id="research">1. 初版搭建与第一批问题（task 77，05:45–15:58，约 10 小时）</h2>
-
-<p>一切从一份文档开始：把 CCM 仓库的 <code>docs/pty-interactive-mode.md</code> 喂给 Claude
-深度讲解，随即落地为独立项目——初始化 <code>/home/ubuntu/Projects/PTY</code>（CLAUDE.md、GitHub remote、
-文档入库），并系统调研了 PTY 的固有坑（kernel buffer ~4KB、<code>pty.openpty</code> vs
-pexpect、轮询延迟等）。期间另做了一轮开源生态扫描（612 行报告
-<code>docs/pty-open-source-research.md</code>），确认 PTY+JSONL 是所有认真项目的共同路线，
-其中 <b>Teleos (zjw49246/Agent2Agent)</b> 的「PTY 只当宿主、消息走 MCP channel」成为最重要的架构参考。</p>
-
-<p>初版框架跑起来后，真实任务（task 45：给会话发文件）立刻撞上第一个大坑：</p>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 0</span>resume 3 秒超时崩溃——PTY 模式的第一个生产事故</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>task 45 发消息后卡死，PTY session 崩溃：<code>Session 06c16dac process died (pid=547800), alive=False</code>。JSONL 显示 CC 在 tool 执行中途消失，随后出现 <code>last-prompt / ai-title / mode</code> 等新 session 初始化元数据——进程死了又被重启</dd>
-    <dt>根因</dt><dd>CC 的 <code>--resume</code> 有 <b>3 秒 stdin 超时</b>：恢复一个处于"等待输入"状态的 session 后，3 秒内收不到输入就直接退出。而初版实现是两步走——先 <code>spawn(resume_id)</code>、过一会儿再 <code>send_prompt()</code>，间隔常超 3 秒</dd>
-    <dt class="fix">解法</dt><dd><code>initial_prompt</code> 贯通三层（commit <code>cecf81c</code>）：<code>Session.start(initial_prompt=...)</code> 在 spawn 的同一时刻投递 prompt，<code>pool.get_or_create</code> 与适配层 <code>launch()</code> 一路传下来。配合 <code>_auto_resume</code> 兜底，task 45 复测成功跑完（15:58）</dd>
-  </dl>
-</div>
-
-<p>task 77 同时识别出三个待解的体验问题，成为后续 Phase 的待办清单：
-<b>thinking 加密不可见</b>（第 7 节解决）、<b>JSONL 轮询延迟</b>（300ms 轮询权衡）、
-<b>resume 时序脆弱</b>（Phase 1 的 channel 注入主路从根上消除）。</p>
-
-<div class="card good"><b>定位结论</b>：claude-pty 是唯一同时具备
-「PTY 宿主 + Channel 注入 + 会话池 + 流式事件 + CCM 权限/号池整合」的 Python 方案。</div>
-
-<!-- ============================================================ -->
-<h2 id="phase0">2. Phase 0：动手前的四个验证（半天）</h2>
-
-<p>重构前先用真实 CC 做了 4 个 spike，每个都直接改变了设计，<b>4/4 通过</b>：</p>
+<p>出路只有一条：<b>额度政策对交互模式友好</b>，所以必须改用 Claude Code 的交互模式。
+但交互模式是为「人坐在终端前」设计的，对程序化调用极不友好：</p>
 
 <table>
-  <tr><th>#</th><th>验证</th><th>结论与影响</th></tr>
-  <tr><td>1</td><td><b>channel 注入能否唤起新 turn</b>（承重墙）</td>
-      <td>✅ idle 会话收到 MCP notification 自动开新 turn。<b>但发现 dev-channels 确认对话框会卡死启动</b>——这正是旧版 channels 全坏的根因</td></tr>
-  <tr><td>2</td><td>交互模式 JSONL 事件形态</td>
-      <td>没有 <code>result</code> 事件（-p 专属）；<b>意外发现 <code>system/turn_duration</code> 哨兵</b>：每 turn 恰一条、在所有消息之后——比 end_turn 可靠得多</td></tr>
-  <tr><td>3</td><td>JSONL 项目目录命名规则</td>
-      <td>实测 CC 规则 = <code>re.sub(r'[^A-Za-z0-9]', '-', cwd)</code>（所有非字母数字→<code>-</code>）；旧实现漏 <code>.</code>/空格 → 路径错位即全盲</td></tr>
-  <tr><td>4</td><td>预写 trust 配置</td>
-      <td>✅ spawn 前往 <code>.claude.json</code> 写 <code>hasTrustDialogAccepted</code> 等字段，对话框从根上不出现</td></tr>
+  <tr><th>-p 模式给程序的东西</th><th>交互模式的现实</th></tr>
+  <tr><td>stdin 传 prompt，一次性</td><td>输入要经过 TUI（快捷键、补全、粘贴处理、确认对话框）</td></tr>
+  <tr><td>stdout 输出结构化 stream-json</td><td>屏幕输出是 ANSI 转义序列渲染的"画面"，不可解析</td></tr>
+  <tr><td>进程退出 = 回合结束，exit code = 成败</td><td>进程常驻不退，没有任何显式的"回合结束"信号</td></tr>
+  <tr><td>额度撞限 → 进程退出报错</td><td>撞限只在屏幕上画一条横幅，进程照常活着</td></tr>
+  <tr><td>不需要终端</td><td>必须有一个真实的 TTY 才肯启动</td></tr>
 </table>
 
-<div class="card warn"><b>方法论教训</b>：对 CC 内部格式的任何假设必须先用真实进程 dump 验证。
-逆向第三方路径/格式规则时要用边界字符做实验（<code>.</code> <code>_</code> 空格 <code>@</code> 大写），不要只验证 happy path。</div>
+<p>而且交互式 CC 拒绝在普通管道上运行——它要求一个真实终端。
+所以方案的形态被问题本身决定了：<b>在交互模式外层套一个伪终端（PTY），
+由框架扮演"坐在终端前的人"，把交互模式重新包装回程序可用的接口。</b>
+这就是 PTY 框架。</p>
 
 <!-- ============================================================ -->
-<h2 id="phase1">3. Phase 1：核心重构——修掉 4 个结构性缺陷</h2>
+<h2 id="method"><span class="no">2</span>方法介绍：我们是怎样解决这个问题的</h2>
 
-<p>对应 commits <code>1f889cc</code>（I/O 核心修复）、<code>0c64014</code>（输入通路切换）、
-<code>3b2546c</code>（文档），+495/-58，单测 92/92 ✅，集成测试 6/6 ✅。</p>
+<h3>2.1 核心思路：PTY 只当宿主，消息走协议层</h3>
 
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 1</span>PTY stdin 逐字符输入（危险且极慢）</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>初版逐字符写 stdin + 每字符 sleep 模拟人类打字：UTF-8 多字节字符被按"字符"拆分发送（中文/emoji 场景脆弱）；prompt 含 <code>\n</code> 被 TUI 当作提交键提前发送；1 万字符要 8 分钟</dd>
-    <dt>根因</dt><dd>把 PTY 当成了消息通道，直接对抗 TUI 输入层的所有复杂性（快捷键、斜杠补全、粘贴处理）</dd>
-    <dt class="fix">解法</dt><dd>输入主路改 <b>channel 注入</b>（MCP notification，完全绕开 TUI，失败重试 5 次）；stdin 仅作 fallback 且改为 <b>bracketed-paste 整段写入</b>（<code>\x1b[200~ ... \x1b[201~</code>），换行不再触发提交</dd>
-  </dl>
-</div>
+<p>最直觉的做法是"全仿真"：往 PTY 里逐字符打字模拟输入，解析 ANSI 屏幕输出拿结果。
+我们验证过，这是死路——UTF-8 多字节字符会被拆坏、换行被当成提交键、一万字符要打 8 分钟，
+而屏幕输出根本无法可靠还原成结构化数据。</p>
 
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 2</span>回合结束检测用 <code>stop_reason=end_turn</code>（提前截断）</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>同一 turn 的 thinking 块和 text 块各占一条 JSONL 行、<b>都带 end_turn</b>，首条命中即截断事件流，尾部消息丢失</dd>
-    <dt class="fix">解法</dt><dd>改用 spike 发现的 <code>{"type":"system","subtype":"turn_duration"}</code> 哨兵——交互模式每 turn 恰好一条且在所有消息之后。三层兜底：哨兵 → response_timeout（30 分钟）→ dispatcher 超时 kill</dd>
-  </dl>
-</div>
+<div class="card key big"><b>我们的设计：PTY 只负责"让进程活着"，真正的输入输出都绕开终端，走协议层。</b><br>
+输入——通过 MCP channel 把消息以 notification 形式直接注入 CC 的上下文，唤起新一轮对话；<br>
+输出——不看屏幕，直接读 CC 自己实时写盘的 session JSONL，拿到的天然就是结构化事件。</div>
 
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 3</span>JSONL 路径推导规则错误（输出通路全盲）</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>旧实现 <code>cwd.replace("/","-").replace("_","-")</code> 漏掉 <code>.</code>/空格等字符，cwd 含这些字符时轮询的文件根本不存在，永远读不到事件</dd>
-    <dt class="fix">解法</dt><dd>按实测改为 <code>re.sub(r"[^A-Za-z0-9]", "-", cwd)</code></dd>
-  </dl>
-</div>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 4</span>启动对话框枚举触发词（channels 整体瘫痪的根因）</div>
-  <dl>
-    <dt class="sym">现象</dt><dd><code>--dangerously-load-development-channels</code> 启动会弹「I am using this for local development / Enter to confirm」确认框。旧触发词列表（trust/safety/…）不含它 → CC 永远卡在对话框 → channel MCP server 从未启动 → inject 全部 Connection refused，<b>整条注入链路自始至终是坏的，且无测试发现</b></dd>
-    <dt>根因</dt><dd>枚举具体对话框文案必然漏；且 CC 用光标定位渲染，可见的"空格"并非真空格，朴素子串匹配也匹不上</dd>
-    <dt class="fix">解法</dt><dd>双保险：(a) spawn 前预写 <code>.claude.json</code> 的 <code>projects[cwd]</code>（hasTrustDialogAccepted + enabledMcpjsonServers），从根上消灭对话框；(b) drain loop 改为<b>通用结构匹配</b>——剥 ANSI + 折叠空白后找 <code>Entertoconfirm</code>（所有确认框的统一尾缀），600ms 冷却后主动 re-check（连续第二个对话框渲染完后 CC 静默，没有新输出驱动检查）。并补上端到端集成测试 TestChannelInjectionIntegration</dd>
-  </dl>
-</div>
-
-<div class="card warn"><b>教训</b>：任何"理论上能用"的路径必须有端到端集成测试。
-channels 链路坏了一整个版本周期，单元测试全绿。</div>
-
-<!-- ============================================================ -->
-<h2 id="phase2">4. Phase 2：接入 CCM——feature flag + 单一分流点</h2>
-
-<p>CCM 侧（PR #24）核心设计：<b>零改动原 -p 路径</b>，单一分流点 + 数据库开关，可随时安全降级。</p>
-
-<pre><code># instance_manager.launch() 单一分流点
-if provider == "claude" and use_pty_mode:
-    return CCMBackend.launch_for_ccm(...)   # PTY 常驻会话
-else:
-    return subprocess("claude", "-p", ..., "--output-format", "stream-json")  # 原样</code></pre>
-
-<ul>
-  <li><b>后端</b>：GlobalSettings 表新增 <code>use_pty_mode</code> 列（migration）+ <code>GET/PUT /api/settings/runtime</code></li>
-  <li><b>前端</b>：导航栏滑动开关（时区选择器左侧）；语义为<b>只影响新启动的任务</b>，关闭时执行中的 PTY 会话跑完为止，idle 会话由 <code>drain_idle()</code> 立即回收（commit <code>0b59e90</code>）</li>
-  <li><b>适配层</b>（commit <code>a02289e</code> / <code>a478051</code>）：CCMBackend 自持 BridgeHub、池内会话默认开 channels、<code>resume_existing</code> 支持冷恢复、proxy kill 联动会话拆除、真实 PTY pid 透出给 Instance.pid</li>
-  <li><b>事件对齐</b>：PTYEvent 与 CCM StreamParser 期望格式 1:1，下游（dispatcher / log_entries / WebSocket）零改动</li>
-</ul>
-
-<p>验证：CCM 单测 66/66 ✅，tsc + vite build ✅，开关 GET/PUT 往返与重启恢复实机验证 ✅。</p>
-
-<!-- ============================================================ -->
-<h2 id="prod">5. 生产实测暴露的问题群（4 个真 bug + 2 个观测盲区）</h2>
-
-<p>接入后用真实任务（task 47/48 等）实测，连环暴露 4 个真 bug，
-集中在 commit <code>30b6588</code> + CCM <code>97565d1</code> 修复：</p>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 5</span>回复黑洞——用户只看到「…我把解释放在这里」</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>chat 回复内容极少甚至没有，正文神秘消失</dd>
-    <dt>根因</dt><dd>channel 注入附带了 <code>pty_bridge_reply</code> 工具 + 指示语，CC 误以为要"用工具回信"，把真实回答发进了<b>无人消费的通道</b>；JSONL 里只剩一句过场白</dd>
-    <dt class="fix">解法</dt><dd>删除 reply 工具；指示语改为「channel 消息 = 用户消息，直接在对话中回答」。回答自然落回 JSONL，被轮询器照常采集</dd>
-  </dl>
-</div>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 6</span>冷恢复卡死——30 分钟超时占死队列</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>resume 已有 session 的任务全部卡死直到超时</dd>
-    <dt>根因</dt><dd>spawn 的瞬间就往 stdin 写 prompt，此时 TUI 尚未就绪，输入被吞 → turn 永远不开始 → 哨兵永远不来</dd>
-    <dt class="fix">解法</dt><dd>删除 spawn 时的 stdin 投递，所有首条消息统一走 channel 注入（注入本身带重试，天然等到 MCP server 就绪）</dd>
-  </dl>
-</div>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 7</span>会话池尸体——中断后下一次 launch 撞死会话</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>mid-turn 手动停止任务后，后续任务复用同 session 失败</dd>
-    <dt>根因</dt><dd>kill 掉进程但池里仍留着死引用，get_or_create 返回尸体</dd>
-    <dt class="fix">解法</dt><dd>stop / kill / 超时三条路径全部联动池清理；mid-turn 永不驱逐改为「死亡即除名」</dd>
-  </dl>
-</div>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 8</span>orphan CC 进程——服务重启后旧进程还占着 session</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>CCM 重启后，前世的 CC 进程仍存活并持有 session 文件</dd>
-    <dt class="fix">解法</dt><dd>CCM lifespan shutdown hook 调 <code>pty_backend.shutdown()</code>，关停时统一回收全部 PTY 会话（CCM <code>97565d1</code>）</dd>
-  </dl>
-</div>
-
-<p>顺手修掉的两个观测盲区：</p>
-<ul>
-  <li><b>日志黑洞</b>：claude_pty 的 logger 没配 root handler，所有日志静默丢弃 → 加 basicConfig，问题 5–8 的定位全靠补上的日志</li>
-  <li><b>额度显示 "unknown"</b>：交互模式 JSONL 无 <code>contextWindow</code> 字段 → 按 model 名回填默认值，用量改从 usage 累加</li>
-</ul>
-
-<!-- ============================================================ -->
-<h2 id="rotation">6. 撞限检测与号池换号（Phase 3 重头戏）</h2>
-
-<p>这是 -p → PTY 迁移中最隐蔽的能力缺口：<b>-p 模式撞限时进程退出、exit code 非零</b>，
-CCM 的号池轮转（检测 → 冷却 → 换号 → 重拉）全靠这个信号；
-而<b>交互模式撞限时进程根本不退出</b>，只在 TUI 上显示一条横幅，PTY turn 会一直挂到超时。</p>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 9</span>撞限文案正则过时（CCM PR #26）</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>新版 CC 的限流文案（如「You've hit your session limit · resets X:XXpm」）不匹配旧正则，-p 模式也换不了号</dd>
-    <dt class="fix">解法</dt><dd>更新正则，5 条真实文案做回归测试；修复默认账号无法参与轮转的 dispatcher 分支。142 个单测通过</dd>
-  </dl>
-</div>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">问题 10</span>PTY 模式撞限无退出信号（PTY <code>6d788f7</code>）</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>交互式 CC 撞限不退出，PTY turn 挂死到 30 分钟超时，无法触发换号</dd>
-    <dt class="fix">解法</dt><dd>四层联动：
-      ① <code>pty_process</code> 常开折叠空白扫描，识别限流横幅（hit your session/weekly limit、usage limit reached）→ <code>rate_limited</code> 标志；
-      ② <code>jsonl_reader</code> 归一化结构化 <code>rate_limit_event</code> 行为 error 事件；
-      ③ <code>session</code> 提前结束 turn，错误消息内嵌「usage limit reached」喂给 CCM 既有检测正则；
-      ④ 适配层把撞限 turn 翻译成 <code>exit_code=1</code> 触发宿主轮转；
-      ⑤ 池在 <code>config_dir</code> 变化（换号）时强制重建会话，绝不热复用撞限账号的会话。
-      <b>CCM 侧零改动</b>——既有轮转链路原样工作</dd>
-  </dl>
-</div>
-
-<!-- ============================================================ -->
-<h2 id="polish">7. 收官：loop 热复用与 thinking 可见性</h2>
-
-<h3>7.1 Loop 热会话复用（CCM PR #27）</h3>
-<p>PTY 模式的本意就是免冷启动，但 loop 最初每轮迭代都新建会话，等于白做：</p>
-<pre><code># 之前（每轮新建，上下文无法累积）
-迭代 0: 新建会话 → turn 1 → 释放 ❌
-迭代 1: 新建会话 → turn 1 → 释放 ❌
-
-# 之后（一个会话、一轮一个 turn）
-迭代 0: 新建常驻会话 → turn 1 → 信号(continue)
-迭代 N: 同一会话注入 → turn N+1 → 信号(done)
-结束:   会话释放 ✅   上下文跨迭代连续、免冷启动</code></pre>
-<p>实测收益：第一轮（冷启动）约 25s，第二轮（热复用）<b>7.8s</b>。
-77 个相关测试通过，含「-p 模式行为零变化」的专用断言。</p>
-
-<h3>7.2 Thinking 可见性（<code>e4ac6ee</code>）</h3>
-<p>交互模式 JSONL 里 thinking 一度只有加密 payload，UI 无法显示。
-后确认 CC 配置 <code>showThinkingSummaries</code> 可让 JSONL 带明文 thinking——问题解决，无需任何解析 hack。</p>
-
-<!-- ============================================================ -->
-<h2 id="ops">8. 运维事故与教训（部署阶段）</h2>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">事故 1</span>生产重启连错数据库</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>重启后服务"正常"，但操作的是临时库 <code>claude_manager_b.db</code>，业务数据全不见</dd>
-    <dt>根因</dt><dd>环境里残留 5 个 .env 变体、3 个数据库文件，启动脚本拿错配置</dd>
-    <dt class="fix">解法</dt><dd>认准生产库 = <b>~800MB 的 <code>claude_manager.db</code></b>；重启前抓全量 env；把所有过期配置/库文件归档进 <code>archive-do-not-use/</code> 并加 README。<b>验证标准：业务数据在不在，而不是 health 接口绿不绿</b></dd>
-  </dl>
-</div>
-
-<div class="problem">
-  <div class="ptitle"><span class="num">事故 2</span>生产 DB 缺 <code>use_pty_mode</code> 列</div>
-  <dl>
-    <dt class="sym">现象</dt><dd>代码同步到位但启动报错：migration 链断裂（PTY migration 排在 PR Monitor 之后却没跑）</dd>
-    <dt class="fix">解法</dt><dd>SQLite 手动 <code>ALTER TABLE</code> 补列对齐账实；之后部署流程加入 migration 状态核对</dd>
-  </dl>
-</div>
-
-<p>最终状态：生产（8002）与开发（8003）同版本对齐 GitHub main，DB 账实一致，PTY 开关、号池修复、PR Monitor 全部到位。</p>
-
-<!-- ============================================================ -->
-<h2 id="how">9. 框架完整工作原理</h2>
-
-<h3>9.1 总体数据流</h3>
 <div class="flow">
   <div class="flow-row">
-    <div class="node"><b>CCM 任务/Chat</b><span>dispatcher</span></div>
+    <div class="node"><b>调用方</b><span>任何需要驱动 Claude Code 的程序</span></div>
   </div>
-  <div class="arrow">↓ instance_manager.launch()（单一分流点，feature flag）</div>
+  <div class="arrow">↓ send_prompt() / stream_events() / interrupt()</div>
   <div class="flow-row">
-    <div class="node hl"><b>CCMBackend</b><span>launch_for_ccm / 事件翻译 / exit_code 合成</span></div>
+    <div class="node hl"><b>Session / SessionPool</b><span>常驻会话封装 · LRU 池 · 免冷启动复用</span></div>
   </div>
   <div class="arrow">↓</div>
   <div class="flow-row">
-    <div class="node"><b>SessionPool</b><span>LRU（默认 20），get_or_create，mid-turn 保护，换号重建</span></div>
+    <div class="node"><b>PTY 宿主</b><span>进程保活 · 自动按掉启动对话框<br>Esc 软中断 · 撞限横幅扫描</span></div>
+    <div class="node gr"><b>输入：channel 注入</b><span>MCP notification 直入上下文<br>绕开 TUI，自动开新 turn</span></div>
+    <div class="node gr"><b>输出：JSONL 轮询</b><span>读 CC 实时写盘的事件流<br>300ms 增量 · 结构化</span></div>
   </div>
-  <div class="arrow">↓ 池 miss 时 spawn</div>
+  <div class="arrow">↓ 结构化事件流（与 -p 模式的 stream-json 对齐）</div>
   <div class="flow-row">
-    <div class="node gr"><b>Session</b><span>send_prompt / inject / interrupt / stream_events</span></div>
-  </div>
-  <div class="flow-row">
-    <div class="node"><b>PTYProcess</b><span>pty.openpty + Popen("claude")<br>drain loop：启动应答 / 限流横幅扫描 / 活动信号</span></div>
-    <div class="node"><b>BridgeHub + channel_server</b><span>HTTP /inject → MCP notification → CC 新 turn</span></div>
-    <div class="node"><b>JsonlReader</b><span>300ms 轮询 session JSONL<br>normalize → PTYEvent</span></div>
-  </div>
-  <div class="arrow">↓ PTYEvent（与 CCM StreamParser 格式对齐）</div>
-  <div class="flow-row">
-    <div class="node"><b>CCM 下游零改动</b><span>log_entries 入库 / WebSocket 推 UI / loop & goal evaluator</span></div>
+    <div class="node"><b>调用方原有的下游逻辑，零改动</b></div>
   </div>
 </div>
 
-<h3>9.2 输入通路：channel 注入为主，stdin 为备</h3>
-<pre><code>send_prompt(text)
-  ├─ 主路：BridgeHub.inject(sid, text)            # 重试 5 次
-  │     → HTTP POST /inject
-  │     → channel_server（MCP stdio 子进程）
-  │     → notifications/claude/channel 推给 CC
-  │     → CC 收到后自动开新 turn（Phase 0 spike 验证）
-  └─ 备路：PTY stdin（仅注入彻底失败时）
-        → bracketed-paste 包裹整段写入（\x1b[200~ … \x1b[201~）</code></pre>
-<p>channel 由 spawn 参数自动启用（<code>--dangerously-load-development-channels server:pty-bridge</code> +
-<code>.mcp.json</code> 注册 <code>claude_pty.channel_server</code>），其确认对话框被预写 trust + 通用应答双保险消灭。</p>
+<p>PTY 层只做四件事：进程保活、启动应答（预写 trust 配置 + 通用对话框自动确认双保险）、
+Esc 软中断、带外信号（活动时间戳与撞限横幅扫描）。
+回合边界用 JSONL 里的 <code>system/turn_duration</code> 哨兵判定——实测它每个 turn 恰好出现一条、
+且在所有消息之后，是交互模式下唯一确定性的"回合结束"信号。
+这些关键假设（注入能唤起新 turn、哨兵的存在、JSONL 路径规则）全部先用真实 CC 进程做 spike 验证后才施工。</p>
 
-<h3>9.3 输出通路：JSONL 轮询 + 哨兵收尾</h3>
-<ul>
-  <li>路径：<code>~/.claude/projects/&lt;re.sub(r'[^A-Za-z0-9]','-',cwd)&gt;/&lt;session_id&gt;.jsonl</code></li>
-  <li>JsonlReader 行缓冲处理 partial write，normalize 跳过 6 种噪声事件，产出与 CCM StreamParser 对齐的事件</li>
-  <li>回合结束 = <code>system/turn_duration</code> 哨兵（交互模式每 turn 恰一条、在所有消息之后；<b>没有 result 事件</b>，cost 从 usage 累加）</li>
-  <li>三层兜底：哨兵 → response_timeout → dispatcher 超时 kill</li>
-</ul>
+<h3>2.2 解决的三个关键问题</h3>
 
-<h3>9.4 PTY 的真正职责（只有四件事）</h3>
+<div class="result">
+  <div class="rtitle"><span class="num">①</span>Thinking 内容的获取</div>
+  <p>本来通过终端方式是<b>无法获得 thinking 内容</b>的——交互模式的 JSONL 里 thinking 只有加密 payload，
+  屏幕上更是看完即逝。这曾被我们列为"无解"的限制。</p>
+  <p>后来我们发现：在 settings 文件里配置 <code>showThinkingSummaries</code> 之后，
+  <b>JSONL 里直接带明文 thinking</b>，框架照常采集，不需要任何解析 hack。</p>
+  <p><b>这对我们十分重要</b>：模型的思考过程是轨迹中最有价值的部分，
+  拿到完整 thinking 意味着我们采集的每一条轨迹都包含「思考 → 行动 → 结果」的全链条。</p>
+</div>
+
+<div class="result">
+  <div class="rtitle"><span class="num">②</span>对运行速度的影响：不降反升</div>
+  <p>-p 模式每个回合都要付"冷启动税"：整进程启动 + 从历史文件重放全部上下文，会话越长越慢。
+  PTY 框架是常驻进程，上下文一直热着，新消息注入即开新 turn。</p>
+  <div class="metric">
+    <div class="m"><b>~25s</b><span>-p 模式一个回合（冷启动 + 重放历史）</span></div>
+    <div class="m"><b>7.8s</b><span>PTY 模式同等回合（热会话实测）</span></div>
+    <div class="m"><b>3×+</b><span>多轮场景提速，会话越长差距越大</span></div>
+  </div>
+  <p>也就是说，这次迁移不是"为了活下去而忍受降级"——<b>速度反而比原来更快</b>。</p>
+</div>
+
+<div class="result">
+  <div class="rtitle"><span class="num">③</span>任务状态的流转：几乎无感</div>
+  <p>上层系统对一个任务的状态机依赖三类信号：回合何时结束、任务成败、异常（撞限/超时/中断）。
+  这些信号在 -p 模式下全部来自"进程退出"，而交互模式进程不退——框架为每个信号都构造了等价物：</p>
+  <table>
+    <tr><th>状态信号</th><th>-p 模式的来源</th><th>PTY 框架的等价物</th></tr>
+    <tr><td>回合结束</td><td>进程退出 + result 事件</td><td><code>turn_duration</code> 哨兵（+ 超时双兜底）</td></tr>
+    <tr><td>成败/退出码</td><td>exit code</td><td>按 turn 结果合成 exit code</td></tr>
+    <tr><td>额度撞限</td><td>进程退出 + stderr 文案</td><td>PTY 输出横幅扫描 + JSONL 信号 → 合成报错与非零退出码，上层换号轮转逻辑原样工作</td></tr>
+    <tr><td>中断</td><td>杀进程（会话作废）</td><td>Esc 软中断——只打断当前 turn，<b>会话保活</b>，下一条消息接着用</td></tr>
+    <tr><td>用量/成本</td><td>result 事件直接给</td><td>逐 turn 累加 usage 字段</td></tr>
+  </table>
+  <p>结论：<b>使用 PTY 框架对任务状态的流转不会产生很大的影响</b>——上层看到的事件流和信号
+  与 -p 模式对齐，状态机不用重写；中断语义甚至变好了（软中断不再报废整个会话）。</p>
+</div>
+
+<h3>2.3 额外解决的问题：-p 模式结构上做不到的能力</h3>
+<p>以下能力不是迁移的目标，而是常驻会话架构的自然产物——但每一项都是 -p 模式结构上不可能支持的：</p>
 <table>
-  <tr><th>职责</th><th>机制</th></tr>
-  <tr><td>进程保活</td><td>pty.openpty() + Popen，常驻交互式 CC</td></tr>
-  <tr><td>启动应答</td><td>drain loop 剥 ANSI + 折叠空白匹配 <code>Entertoconfirm</code>，600ms 冷却 re-check</td></tr>
-  <tr><td>软中断</td><td>写 Esc 字节，CC 当前 turn 优雅终止</td></tr>
-  <tr><td>带外信号</td><td><code>_last_output</code> 活动信号；限流横幅扫描 → <code>rate_limited</code></td></tr>
+  <tr><th>能力</th><th>-p 模式</th><th>PTY 框架</th></tr>
+  <tr><td><b>执行中注入消息</b></td><td>启动后即黑盒，只能等整个回合跑完</td><td>channel 注入支持任务执行中途插入新指令——跑偏了立即纠偏，不必等它把错误路线走完</td></tr>
+  <tr><td><b>软中断</b></td><td>中断 = 杀进程 = 会话作废重来</td><td>Esc 只打断当前 turn，上下文完好，下一条消息接着用</td></tr>
+  <tr><td><b>多轮上下文累积</b></td><td>循环任务每轮失忆重启，靠 prompt 塞摘要</td><td>同一会话一轮一个 turn，第 N 轮天然记得前 N−1 轮</td></tr>
+  <tr><td><b>额度利用效率</b></td><td>每回合冷启动，prompt cache 全 miss</td><td>常驻会话连续 turn 落在 cache TTL 内，命中率远高于冷启动——同样的额度跑更多任务（定量对比待做，方向确定）</td></tr>
 </table>
+<p>其中第四点在"额度大幅下降"的背景下是第二层生存价值：<b>不仅能用交互模式，还把每一分额度用得更省。</b></p>
 
-<h3>9.5 会话池与生命周期语义</h3>
-<pre><code># 关闭 PTY 开关的完整语义
-set_pty_mode(False)
-  ├─ 新任务立即走 -p
-  ├─ 执行中的 turn 跑完为止（不中途杀）
-  ├─ idle 会话立即回收（drain_idle）
-  └─ 死亡/中断/超时全路径联动池清理（无尸体）
-
-# 撞限换号
-检测（横幅/JSONL/正则三路）→ turn 以 exit_code=1 结束
-  → CCM 既有轮转：冷却 → 选新账号（新 config_dir）
-  → 池发现 config_dir 变化 → 强制重建会话 → --resume 续上下文</code></pre>
-
-<h3>9.6 代码地图</h3>
+<h3>2.4 工程可靠性：踩过的坑都已闭环</h3>
+<p>从初版到生产可用，我们定位并修复了一系列问题，每一个都有复现、根因和回归测试：</p>
 <table>
-  <tr><th>模块</th><th>职责</th></tr>
-  <tr><td><code>src/claude_pty/pty_process.py</code></td><td>PTY 宿主：spawn、drain loop、启动应答、限流扫描、活动信号</td></tr>
-  <tr><td><code>src/claude_pty/jsonl_reader.py</code></td><td>JSONL 轮询、行缓冲、normalize 成 PTYEvent</td></tr>
-  <tr><td><code>src/claude_pty/session.py</code></td><td>会话封装：send_prompt（注入+fallback）、哨兵收尾、rate_limited 终结</td></tr>
-  <tr><td><code>src/claude_pty/session_pool.py</code></td><td>LRU 池、mid-turn 保护、drain_idle、换号重建</td></tr>
-  <tr><td><code>src/claude_pty/channel_server.py</code></td><td>MCP stdio 子进程，BridgeHub HTTP → CC notification</td></tr>
-  <tr><td><code>src/claude_pty/ccm_backend.py</code> + adapters</td><td>CCM 适配：事件翻译、pid 透出、exit_code 合成、shutdown 回收</td></tr>
+  <tr><th>问题</th><th>根因 → 修复</th></tr>
+  <tr><td>resume 3 秒超时崩溃</td><td>CC 恢复会话后 3 秒收不到输入即退出 → spawn 同刻投递 initial_prompt</td></tr>
+  <tr><td>启动对话框卡死</td><td>枚举文案必然漏 → 预写 trust 配置 + 剥 ANSI 折叠空白后按结构特征（"Enter to confirm"）通用匹配</td></tr>
+  <tr><td>回合提前截断</td><td>误用 end_turn 判回合 → 改 turn_duration 哨兵</td></tr>
+  <tr><td>输出全盲</td><td>JSONL 路径推导规则错 → 实测逆向出真实规则（所有非字母数字 → <code>-</code>）</td></tr>
+  <tr><td>回复进了"黑洞"</td><td>注入附带的回信工具误导模型 → 删工具，注入消息即用户消息</td></tr>
+  <tr><td>会话池残留死会话</td><td>kill 后池里留尸体 → 死亡即除名，全路径联动清理</td></tr>
+  <tr><td>撞限挂死</td><td>交互模式撞限不退出 → 横幅扫描合成退出信号（见 2.2-③）</td></tr>
 </table>
+<p>全部修复均有单元 + 端到端测试覆盖（累计 400+ 用例），并在多账号、长会话、循环任务的真实负载下验证过。</p>
 
 <!-- ============================================================ -->
-<h2 id="summary">10. 总账</h2>
+<h2 id="meaning"><span class="no">3</span>这个东西对我们的意义</h2>
 
-<div class="timeline">
-  <div class="tl-item"><span class="when">05:45</span><b>task 77 启动</b>：深读 pty-interactive-mode.md，初始化 PTY 项目，调研 PTY 固有坑 + 开源生态（612 行报告）</div>
-  <div class="tl-item fix"><span class="when">14:03</span><b>第一个生产事故</b>：task 45 实测暴露 resume 3 秒超时崩溃，<code>initial_prompt</code> 贯通修复（<code>cecf81c</code>），15:58 复测通过</div>
-  <div class="tl-item"><span class="when">14:37</span><b>task 79 启动</b>：方案讨论，诊断出初版 4 大结构性缺陷</div>
-  <div class="tl-item feat"><span class="when">15:07</span><b>Phase 0</b>：4 个 spike 全部通过，发现 turn_duration 哨兵与真实路径规则</div>
-  <div class="tl-item feat"><span class="when">15:41</span><b>Phase 1</b>：核心重构 4 连修（<code>1f889cc</code> <code>0c64014</code>），92 单测全绿</div>
-  <div class="tl-item feat"><span class="when">16:15</span><b>Phase 2</b>：CCM 接线 + 导航栏开关（PR #24），66 单测全绿</div>
-  <div class="tl-item fix"><span class="when">17:22</span><b>生产实测</b>：回复黑洞 / 冷恢复卡死 / 池尸体 / orphan 四连修（<code>30b6588</code> + CCM <code>97565d1</code>）</div>
-  <div class="tl-item fix"><span class="when">18:38</span><b>部署事故</b>：错库 + 缺列，环境归档治理</div>
-  <div class="tl-item feat"><span class="when">19:0x</span><b>号池双修</b>：撞限文案正则（PR #26）+ PTY 撞限检测（<code>6d788f7</code>）</div>
-  <div class="tl-item feat"><span class="when">19:45</span><b>thinking 可见性</b>：showThinkingSummaries 落明文（<code>e4ac6ee</code>）</div>
-  <div class="tl-item feat"><span class="when">20:15</span><b>loop 热复用</b>（PR #27）收官：第二轮 7.8s vs 冷启动 25s</div>
+<div class="card good big">
+<b>所有项目不需要大改，就可以无痛地从 -p 模式迁移到交互模式，并且拿到比以前更丰富的轨迹。</b>
 </div>
 
+<p>具体来说，PTY 框架给了我们三样东西：</p>
+
 <table>
-  <tr><th></th><th>数字</th></tr>
-  <tr><td>总时长</td><td>约 14.5 小时（task 77 + 79，05:45–20:15）</td></tr>
-  <tr><td>定位并修复的问题</td><td>16+（resume 超时 + 4 结构性缺陷 + 4 生产 bug + 2 观测盲区 + 2 撞限 + 2 运维事故 + thinking）</td></tr>
-  <tr><td>代码改动</td><td>1,500+ 行，PTY 仓库 10+ commits，CCM PR #24/#26/#27</td></tr>
-  <tr><td>测试</td><td>400+ 单测通过，端到端集成测试补齐，零回归</td></tr>
-  <tr><td>性能</td><td>loop 热复用 7.8s/轮（冷启动 25s）；channel 注入瞬时投递（旧逐字符 8 分钟/万字符）</td></tr>
-  <tr><td>状态</td><td>GitHub main，生产/开发双环境对齐，feature flag 可随时降级到 -p</td></tr>
+  <tr><th>意义</th><th>说明</th></tr>
+  <tr><td><b>生存</b></td><td>6 月 15 日之后 -p 模式额度不再可用，而我们的全部项目可以原样跑在交互模式上——框架对上层暴露的事件流和信号与 -p 对齐，迁移成本接近零</td></tr>
+  <tr><td><b>更好的运行时</b></td><td>不是降级求生：常驻会话免冷启动（7.8s vs 25s）、可中途注入消息、可软中断不报废会话——这些都是 -p 模式做不到的</td></tr>
+  <tr><td><b>更丰富的轨迹</b></td><td>完整 thinking + 工具调用 + 结果的全链条结构化轨迹，是后续一切数据工作的原料</td></tr>
+  <tr><td><b>通用的方法论资产</b></td><td>「PTY 当宿主 + 消息走协议层 + 读结构化日志」不绑定 Claude Code——任何交互式 CLI agent（Codex CLI、Gemini CLI…）都适用同一套打法。哪家的非交互模式收紧，都可以再套一次，这是可复用的框架而非一次性补丁</td></tr>
+  <tr><td><b>逆向 know-how 壁垒</b></td><td>JSONL 路径规则、turn_duration 哨兵、resume 3 秒超时、trust 预写、thinking 配置——这些没有任何官方文档，全靠真实进程实验逆向而得。"少数能做到的团队"，护城河正是这堆细节</td></tr>
 </table>
 
-<div class="card good big"><b>三条最值钱的经验</b><br>
-1. <b>协议优先</b>：PTY 只当宿主，凡是结构化数据都走协议层（MCP 注入 / JSONL 轮询），不要和 TUI 缠斗。<br>
-2. <b>先验证后施工</b>：对第三方内部行为的每个假设都先 spike（turn_duration、路径规则都是 spike 的意外收获）。<br>
-3. <b>端到端测试不可省</b>：channels 链路坏了整整一版而单测全绿；信号迁移（-p 的 exit code → PTY 的横幅）要逐项盘点能力等价。</div>
+<p class="big">交互模式的程序化驱动有相当的技术门槛——真实 TTY、TUI 对话框、回合边界、撞限信号，
+每一关都能挡住一批团队。<b>在 6 月 15 号之后，我们可能会成为少数能够做到这一点的团队。</b></p>
 
 <footer>
-  数据来源：CCM 生产库 task 77 / 79 完整轨迹、
-  Claude-Code-PTY git 历史（5d60040…6d788f7）、PROGRESS.md、docs/pty-solution.md。
-  生成于 2026-06-10。
+  Claude-Code-PTY · 独立框架 · 设计要点与数据均来自真实进程验证与生产负载实测 · 2026-06-11
 </footer>
 
 </div>

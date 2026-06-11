@@ -68,7 +68,9 @@ class PTYProcess:
         channel_inject_port: int | None = None,
         bridge_port: int | None = None,
     ):
-        self.cwd = cwd
+        # 归一化为绝对路径：jsonl_path 按 cwd 字面推导，相对路径（如 "."）
+        # 会推出错误的 projects 目录，轮询永远读不到事件（CCM task 55 实录）
+        self.cwd = os.path.abspath(os.path.expanduser(cwd or "."))
         self.session_id = session_id or str(uuid.uuid4())
         self.config = config or PTYConfig()
         self._on_death = on_death

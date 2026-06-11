@@ -126,3 +126,22 @@ class TestSetupMcpConfig:
 
             assert "other-server" in data["mcpServers"]
             assert "pty-bridge" in data["mcpServers"]
+
+
+class TestCwdNormalization:
+    """cwd 必须归一化为绝对路径：jsonl_path 按字面推导，
+    相对路径会推出错误的轮询目录（CCM PR-review task 实录）。"""
+
+    def test_relative_dot_cwd_resolves_absolute(self, monkeypatch, tmp_path):
+        from claude_pty.pty_process import PTYProcess
+        import os, re
+        monkeypatch.chdir(tmp_path)
+        p = PTYProcess(cwd=".")
+        assert os.path.isabs(p.cwd)
+        expected = re.sub(r"[^A-Za-z0-9]", "-", str(tmp_path))
+        assert f"/projects/{expected}/" in p.jsonl_path
+
+    def test_absolute_cwd_unchanged(self):
+        from claude_pty.pty_process import PTYProcess
+        p = PTYProcess(cwd="/home/user/repo")
+        assert p.cwd == "/home/user/repo"
