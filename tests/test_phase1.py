@@ -112,6 +112,26 @@ class TestPretrustWorkdir:
         entry = json.loads(claude_json.read_text())["projects"]["/some/workdir"]
         assert "pty-bridge" in entry["enabledMcpjsonServers"]
 
+    def test_marks_onboarding_complete(self, tmp_path):
+        # First interactive run of a fresh config_dir must not hit the
+        # theme picker (headless-provisioned dirs have no onboarding state).
+        claude_json = tmp_path / ".claude.json"
+        proc = PTYProcess(cwd="/w", session_id="sid-1")
+        proc._pretrust_workdir(claude_json_path=str(claude_json))
+        cfg = json.loads(claude_json.read_text())
+        assert cfg["hasCompletedOnboarding"] is True
+        assert cfg["theme"] == "dark"
+
+    def test_existing_onboarding_state_preserved(self, tmp_path):
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps(
+            {"hasCompletedOnboarding": True, "theme": "light"}
+        ))
+        proc = PTYProcess(cwd="/w", session_id="sid-1")
+        proc._pretrust_workdir(claude_json_path=str(claude_json))
+        cfg = json.loads(claude_json.read_text())
+        assert cfg["theme"] == "light"  # user choice untouched
+
     def test_missing_file_created(self, tmp_path):
         claude_json = tmp_path / "sub" / ".claude.json"
         proc = PTYProcess(cwd="/w", session_id="sid-1")

@@ -10,7 +10,7 @@
 - **注入隔离**（防同机多宿主串话）：inject 端口由 OS 分配（非固定计数器）；注入负载带目标 session_id，channel_server 不匹配回 409；channel_server inject 端口 bind 失败只禁用注入不崩 MCP
 - **输出**：轮询 `~/.claude/projects/<re.sub(r'[^A-Za-z0-9]','-',cwd)>/<session_id>.jsonl`，normalize 成与 CCM StreamParser 对齐的事件
 - **回合结束**：`system/turn_duration` JSONL 哨兵（交互模式每 turn 恰一条，在所有消息之后；没有 result 事件）。例外：`isApiErrorMessage: true` 的 assistant 消息表示 turn 被 API 错误掐断，之后不会再有哨兵——立即以错误事件结束 turn
-- **启动对话框**：spawn 前预写 `.claude.json` trust 条目（主）+ drain loop 通用 `Entertoconfirm` 自动应答（兜底，剥 ANSI + 折叠空白匹配）
+- **启动对话框**：spawn 前预写 `.claude.json` trust 条目 + 顶层 `hasCompletedOnboarding/theme`（首次交互模式会弹 theme picker，-p 模式从不弹）（主）+ drain loop 通用 `Entertoconfirm` 自动应答（兜底，剥 ANSI + 折叠空白匹配）
 - **PTY 职责**：进程保活、Esc 中断、启动应答、输出活动信号（`_last_output`）
 
 历史教训见 PROGRESS.md，待办见 TODO.md。

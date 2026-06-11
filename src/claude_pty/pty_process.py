@@ -180,6 +180,13 @@ class PTYProcess:
                     )
                     return
 
+            # First interactive run of a config_dir shows the global
+            # onboarding (theme picker) — `-p` mode never does, so dirs
+            # provisioned for headless use hit it on their first PTY spawn
+            # and the session wedges. Mark onboarding complete up front.
+            cfg.setdefault("hasCompletedOnboarding", True)
+            cfg.setdefault("theme", "dark")
+
             projects = cfg.setdefault("projects", {})
             entry = projects.setdefault(self.cwd, {})
             entry["hasTrustDialogAccepted"] = True
