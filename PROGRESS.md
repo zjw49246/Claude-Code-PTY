@@ -13,7 +13,7 @@
   2. `BridgeHub.inject` 负载携带目标 `session_id`，channel_server 不匹配回 409（无 session_id 的旧宿主请求兼容放行）——即使端口碰撞/复用，消息也不可能漏进别的会话，注入方拿到 False 走 stdin fallback；
   3. channel_server 端口 bind 失败不再崩整个 MCP server，仅禁用注入（stdin fallback 仍可用）。
 - **教训**：localhost 多进程间的"端口即身份"不可靠——任何跨进程投递都要带显式收件人校验；固定起始的端口计数器在单进程内看似安全，多宿主部署立即失效。回归测试要覆盖"两个宿主同机共存"的场景。
-- **Commit**: 见本节合入 main 的 commit。
+- **Commit**: aa23aab
 
 ## 2026-06-10 Phase 1: I/O 核心重构（commits 1f889cc, 0c64014）
 
