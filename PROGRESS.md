@@ -1,5 +1,15 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-06-12 限流横幅误报连环冻结三个健康账号（CCM task 81/82）
+
+### 问题：会话讨论 rate limit / 读本仓库源码就被判"撞限"
+
+- **现象**：CCM 生产 task 81（调查 PTY）和 task 82（做撞限熔断）反复以 "usage limit reached (detected in PTY session)" 失败、exit_code=1，CCM rotation 把三个额度健康的账号全部误冻（用户手动解冻）。
+- **根因**：drain loop 的横幅扫描对**所有 PTY 输出**（剥 ANSI+折叠空白+小写）滚动匹配 `usagelimitreached` 等标记，不区分 CC 真横幅与 TUI 渲染的**对话正文**。task 81/82 的 tool result 里 Read 了 `pty_process.py`/account pool 源码（标记字符串全在里面）、讨论中也满是 limit 字样 → 误中。且 `rate_limited` 是进程级 sticky flag（只在 spawn 重置），误中一次后该进程每个 turn 都被掐死 → CCM 按错误文本冻号换号 → 新号继续同一会话再误中 → 连环冻。三个账号的 JSONL 验证：0 条结构化 `rate_limit_event`，所有标记命中均为对话正文。
+- **解决**（3434cd3）：横幅信号单独不可信，需 JSONL 活动交叉验证——turn 已有 JSONL 消息流动 → 判误报清 flag 继续；turn 零 JSONL 输出（真撞限签名：API 直接拒绝、什么都不写）再静默 `rate_limit_confirm_quiet`（默认 15s）才确认；turn 正常完成时清残留 flag 防毒化下一 turn；结构化 `rate_limit_event` 仍立即可信。
+- **教训**：对终端输出做文本匹配的任何"带外信号"都必须考虑**信号文本被会话自己渲染**的自指场景（本仓库的代码/测试里就含有全部标记字符串）；sticky 进程级 flag 要有显式清除路径；判定要与权威数据源（JSONL）交叉验证而非单一文本信号定罪。
+- **Commit**: 3434cd3
+
 ## 2026-06-12 全新 config_dir 首次交互模式卡 theme picker
 
 ### 问题：headless 供给的 config_dir 第一次跑 PTY，claude 卡在 onboarding
