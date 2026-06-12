@@ -15,8 +15,19 @@ class PTYConfig:
 
     startup_wait: float = 8.0
     post_response_wait: float = 3.0
+    # Inactivity timeout for a turn: extended whenever JSONL activity (or a
+    # sub-agent transcript) advances — NOT an absolute cap, so turns chaining
+    # long sub-agent calls aren't cut mid-flight (which would strand unread
+    # events and misalign the next turn's reply).
     response_timeout: float = 1800.0
     jsonl_poll_interval: float = 0.3
+    # Idle watcher: poll interval for consuming autonomous turns (harness
+    # wakes the session on background sub-agent notifications) between
+    # send_prompt calls.
+    idle_poll_interval: float = 1.0
+    # How often to stat sub-agent transcripts as an activity signal while the
+    # main JSONL is silent.
+    subagent_check_interval: float = 5.0
     # Channel inject has no delivery ACK from CC (HTTP 200 only means the
     # notification reached the channel server). If no JSONL activity appears
     # within this window, the prompt is re-sent via PTY stdin.

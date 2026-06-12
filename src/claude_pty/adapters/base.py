@@ -76,6 +76,14 @@ class BasePTYBackend:
 
         self._launch_params[key] = {"prompt": prompt, "cwd": cwd, **kwargs}
 
+        # Route autonomous-turn events (harness sub-agent notifications waking
+        # the session between prompts) into the host like any other event.
+        # Rebound on every launch so the context (task_id, ...) stays current.
+        async def _on_autonomous(event, _key=key, _kwargs=dict(kwargs)):
+            await self.on_event(_key, event.to_dict(), **_kwargs)
+
+        session.on_autonomous_event = _on_autonomous
+
         logger.info("PTY session created: key=%s session_id=%s alive=%s", key, session.session_id, session.is_alive)
         consumer = asyncio.create_task(
             self._consume(key, session, prompt, **kwargs)

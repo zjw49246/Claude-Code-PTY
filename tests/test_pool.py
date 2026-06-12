@@ -17,6 +17,7 @@ def _make_mock_session(alive=True, idle=0.0, locked=False):
     session.idle_seconds = idle
     session._send_lock = MagicMock()
     session._send_lock.locked.return_value = locked
+    session.has_pending_subagents = False
     session.stop = AsyncMock()
     return session
 

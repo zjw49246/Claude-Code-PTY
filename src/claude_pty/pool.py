@@ -97,16 +97,24 @@ class SessionPool:
             return session
 
     async def _evict_one(self) -> bool:
-        # Prefer idle sessions past timeout
+        # Prefer idle sessions past timeout. Sessions with pending native
+        # sub-agents are never idle — the main JSONL is silent only because
+        # a sub-agent is still working and will wake it.
         candidates = []
         for sid, session in self._sessions.items():
-            if session.idle_seconds >= self.config.idle_timeout:
+            if (
+                session.idle_seconds >= self.config.idle_timeout
+                and not session.has_pending_subagents
+            ):
                 candidates.append((self._access_order.get(sid, 0), sid))
 
         if not candidates:
-            # Force-evict oldest that isn't mid-prompt
+            # Force-evict oldest that isn't mid-prompt or awaiting sub-agents
             for sid, session in self._sessions.items():
-                if not session._send_lock.locked():
+                if (
+                    not session._send_lock.locked()
+                    and not session.has_pending_subagents
+                ):
                     candidates.append((self._access_order.get(sid, 0), sid))
 
         if not candidates:
@@ -143,6 +151,7 @@ class SessionPool:
             idle_ids = [
                 sid for sid, session in self._sessions.items()
                 if not session._send_lock.locked()
+                and not session.has_pending_subagents
             ]
             stopped = 0
             for sid in idle_ids:

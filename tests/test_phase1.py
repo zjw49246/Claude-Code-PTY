@@ -274,6 +274,7 @@ class TestDrainIdle:
                 self.stopped = False
                 self.is_alive = True
                 self.idle_seconds = 0.0
+                self.has_pending_subagents = False
 
             async def stop(self):
                 self.stopped = True
@@ -395,7 +396,12 @@ class TestRateLimitDetection:
 
         class FakeReader:
             def read_new_messages(self): return []
-            def normalize(self, raw): return []
+            def normalize(self, raw, include_user_text=False):
+                return []
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c)
             def is_response_complete(self, raw): return False
 
         class FakeProc:
@@ -433,12 +439,19 @@ class TestRateLimitDetection:
             """第一轮吐 tool_result（内容含 limit 字样），第二轮吐哨兵。"""
             def __init__(self):
                 self.batches = [
-                    [{"type": "user", "toolUseResult": True}],
+                    [],  # 投递前的 backlog drain
+                    [{"type": "user", "message": {"content": "hello"}},
+                     {"type": "user", "toolUseResult": True}],
                     [{"type": "system", "subtype": "turn_duration"}],
                 ]
             def read_new_messages(self):
                 return self.batches.pop(0) if self.batches else []
-            def normalize(self, raw): return []
+            def normalize(self, raw, include_user_text=False):
+                return []
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c)
             def is_response_complete(self, raw):
                 return raw.get("subtype") == "turn_duration"
 
@@ -477,10 +490,19 @@ class TestRateLimitDetection:
 
         class FakeReader:
             def __init__(self):
-                self.batches = [[{"type": "system", "subtype": "turn_duration"}]]
+                self.batches = [
+                    [],  # 投递前的 backlog drain
+                    [{"type": "user", "message": {"content": "hello"}},
+                     {"type": "system", "subtype": "turn_duration"}],
+                ]
             def read_new_messages(self):
                 return self.batches.pop(0) if self.batches else []
-            def normalize(self, raw): return []
+            def normalize(self, raw, include_user_text=False):
+                return []
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c)
             def is_response_complete(self, raw):
                 return raw.get("subtype") == "turn_duration"
 
@@ -515,11 +537,19 @@ class TestRateLimitDetection:
 
         class FakeReader:
             def __init__(self):
-                self.batches = [[{"type": "rate_limit_event",
-                                  "rate_limit_info": {"status": "rejected"}}]]
+                self.batches = [
+                    [],  # 投递前的 backlog drain
+                    [{"type": "rate_limit_event",
+                      "rate_limit_info": {"status": "rejected"}}],
+                ]
             def read_new_messages(self):
                 return self.batches.pop(0) if self.batches else []
-            def normalize(self, raw): return []
+            def normalize(self, raw, include_user_text=False):
+                return []
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c)
             def is_response_complete(self, raw): return False
 
         class FakeProc:
@@ -631,11 +661,13 @@ class TestApiErrorTurnAbort:
                                            jsonl_poll_interval=0.01))
 
         class FakeReader:
-            sent = False
+            step = 0
 
             def read_new_messages(self):
-                if not self.sent:
-                    self.sent = True
+                self.step += 1
+                if self.step == 1:
+                    return []  # 投递前的 backlog drain
+                if self.step == 2:
                     return [{
                         "type": "assistant",
                         "isApiErrorMessage": True,
@@ -644,8 +676,13 @@ class TestApiErrorTurnAbort:
                     }]
                 return []
 
-            def normalize(self, raw):
+            def normalize(self, raw, include_user_text=False):
                 return []
+
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c)
 
             def is_response_complete(self, raw):
                 return False
@@ -702,11 +739,17 @@ class TestInjectDeliveryConfirm:
 
             def read_new_messages(self):
                 if self.unblocked:
-                    return [{"type": "system", "subtype": "turn_duration"}]
+                    return [{"type": "user", "message": {"content": "hello"}},
+                            {"type": "system", "subtype": "turn_duration"}]
                 return []
 
-            def normalize(self, raw):
+            def normalize(self, raw, include_user_text=False):
                 return []
+
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c)
 
             def is_response_complete(self, raw):
                 return raw.get("subtype") == "turn_duration"
@@ -744,14 +787,21 @@ class TestInjectDeliveryConfirm:
             def read_new_messages(self):
                 self.step += 1
                 if self.step == 1:
+                    return []  # 投递前的 backlog drain
+                if self.step == 2:
                     return [{"type": "user",
                              "message": {"content": "hello"}}]
-                if self.step == 2:
+                if self.step == 3:
                     return [{"type": "system", "subtype": "turn_duration"}]
                 return []
 
-            def normalize(self, raw):
+            def normalize(self, raw, include_user_text=False):
                 return []
+
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c)
 
             def is_response_complete(self, raw):
                 return raw.get("subtype") == "turn_duration"

@@ -16,6 +16,10 @@ class EventType(str, Enum):
     SESSION_STARTED = "session_started"
     SESSION_CRASHED = "session_crashed"
     SESSION_RESUMED = "session_resumed"
+    # Native sub-agent lifecycle (Agent/Task/Monitor tools observed in JSONL)
+    SUBAGENT_SPAWN = "subagent_spawn"
+    SUBAGENT_PROGRESS = "subagent_progress"
+    SUBAGENT_DONE = "subagent_done"
 
 
 @dataclass
@@ -36,6 +40,14 @@ class PTYEvent:
     session_id: str | None = None
     cost_usd: float | None = None
     context_usage: dict | None = None
+    # True for backlog events drained from a previous turn (must not be
+    # presented as the current turn's reply)
+    orphan: bool = False
+    # True for events from harness-initiated turns (sub-agent notifications
+    # waking the session) consumed outside any send_prompt
+    autonomous: bool = False
+    # Native sub-agent lifecycle payload (SUBAGENT_* events)
+    subagent: dict | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -55,4 +67,10 @@ class PTYEvent:
             d["cost_usd"] = self.cost_usd
         if self.context_usage is not None:
             d["context_usage"] = self.context_usage
+        if self.orphan:
+            d["orphan"] = True
+        if self.autonomous:
+            d["autonomous"] = True
+        if self.subagent is not None:
+            d["subagent"] = self.subagent
         return d

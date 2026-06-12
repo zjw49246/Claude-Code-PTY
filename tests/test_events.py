@@ -10,6 +10,7 @@ class TestEventType:
             "tool_use", "tool_result", "result", "process_exit",
             "parse_error", "session_started", "session_crashed",
             "session_resumed",
+            "subagent_spawn", "subagent_progress", "subagent_done",
         }
         actual = {e.value for e in EventType}
         assert actual == expected

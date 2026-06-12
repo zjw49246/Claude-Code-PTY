@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from .events import PTYEvent, EventType
+from .subagents import SubagentTracker
 
 
 # JSONL message types that carry no useful event data
@@ -30,10 +31,13 @@ class JsonlReader:
     JSONL into events structurally identical to CCM's StreamParser.parse_line().
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, tracker: SubagentTracker | None = None):
         self.path = path
         self._offset: int = 0
         self._buffer: str = ""
+        # Optional native sub-agent tracker: when set, normalize() also emits
+        # SUBAGENT_SPAWN/PROGRESS/DONE events for Agent/Task/Monitor tools.
+        self.tracker = tracker
 
     def read_new_messages(self) -> list[dict]:
         if not os.path.exists(self.path):
@@ -66,10 +70,17 @@ class JsonlReader:
                 pass
         return results
 
-    def normalize(self, raw: dict) -> list[PTYEvent]:
+    def normalize(
+        self, raw: dict, include_user_text: bool = False
+    ) -> list[PTYEvent]:
         """Normalize a single interactive-mode JSONL message into PTYEvent(s).
 
         The output matches CCM's StreamParser.parse_line() event structure.
+
+        include_user_text: also emit user text blocks as MESSAGE events. Off
+        for normal turns (the host already knows the prompt it sent); on for
+        autonomous turns, where the "user" text is a harness-injected
+        <task-notification> the host has never seen.
         """
         msg_type = raw.get("type", "")
         now = raw.get(
@@ -136,7 +147,9 @@ class JsonlReader:
             return events
 
         if msg_type == "user":
-            return self._normalize_user(message, raw_json, now, session_id)
+            return self._normalize_user(
+                message, raw_json, now, session_id, include_user_text
+            )
 
         return []
 
@@ -237,6 +250,19 @@ class JsonlReader:
                         session_id=session_id,
                     )
                 )
+                if self.tracker is not None:
+                    spawn = self.tracker.note_tool_use(block)
+                    if spawn:
+                        events.append(
+                            PTYEvent(
+                                event_type=EventType.SUBAGENT_SPAWN,
+                                role="assistant",
+                                content=spawn.get("description"),
+                                subagent=spawn,
+                                timestamp=now,
+                                session_id=session_id,
+                            )
+                        )
             elif block_type == "thinking":
                 events.append(
                     PTYEvent(
@@ -266,15 +292,37 @@ class JsonlReader:
         return events
 
     def _normalize_user(
-        self, message: dict, raw_json: str, now: str, session_id: str | None
+        self,
+        message: dict,
+        raw_json: str,
+        now: str,
+        session_id: str | None,
+        include_user_text: bool = False,
     ) -> list[PTYEvent]:
         msg_content = message.get("content", [])
+        if isinstance(msg_content, str):
+            # Plain-string user message (stdin-delivered prompts, harness
+            # notifications). Only surfaced for autonomous turns.
+            if include_user_text and msg_content.strip():
+                return self._user_text_events(
+                    msg_content, raw_json, now, session_id
+                )
+            return []
         if not isinstance(msg_content, list):
             return []
 
         events: list[PTYEvent] = []
         for block in msg_content:
-            if not isinstance(block, dict) or block.get("type") != "tool_result":
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text", "")
+                if include_user_text and text.strip():
+                    events.extend(
+                        self._user_text_events(text, raw_json, now, session_id)
+                    )
+                continue
+            if block.get("type") != "tool_result":
                 continue
             raw_content = block.get("content", "")
             if isinstance(raw_content, list):
@@ -297,7 +345,84 @@ class JsonlReader:
                     session_id=session_id,
                 )
             )
+            if self.tracker is not None:
+                done = self.tracker.note_tool_result(
+                    block.get("tool_use_id"), tool_output or ""
+                )
+                if done:
+                    events.append(
+                        PTYEvent(
+                            event_type=EventType.SUBAGENT_DONE,
+                            role="assistant",
+                            content=done.get("description"),
+                            subagent=done,
+                            timestamp=now,
+                            session_id=session_id,
+                        )
+                    )
         return events
+
+    def _user_text_events(
+        self, text: str, raw_json: str, now: str, session_id: str | None
+    ) -> list[PTYEvent]:
+        events = [
+            PTYEvent(
+                event_type=EventType.MESSAGE,
+                role="user",
+                content=text,
+                raw_json=raw_json,
+                timestamp=now,
+                session_id=session_id,
+            )
+        ]
+        if self.tracker is not None:
+            update = self.tracker.note_user_text(text)
+            if update:
+                kind = update.pop("event", "progress")
+                events.append(
+                    PTYEvent(
+                        event_type=(
+                            EventType.SUBAGENT_DONE
+                            if kind == "done"
+                            else EventType.SUBAGENT_PROGRESS
+                        ),
+                        role="assistant",
+                        content=update.get("summary") or update.get("description"),
+                        subagent=update,
+                        timestamp=now,
+                        session_id=session_id,
+                    )
+                )
+        return events
+
+    def is_prompt_echo(self, raw: dict, prompt: str) -> bool:
+        """True when this JSONL line is the user-message echo of `prompt`.
+
+        CC records every delivered prompt as a user message (channel-injected
+        prompts arrive wrapped in a <channel ...> tag, stdin prompts verbatim),
+        so substring containment over the user text identifies the start of
+        OUR turn. Needed because turn_duration sentinels from earlier turns
+        may still sit unread in the file — counting one of those would end
+        the new turn with the previous turn's output (the task-87 off-by-one).
+        """
+        if raw.get("type") != "user":
+            return False
+        message = raw.get("message", {})
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+        else:
+            return False
+        needle = prompt.strip()
+        if not needle:
+            return False
+        return any(needle in t for t in texts)
 
     def is_response_complete(self, raw: dict) -> bool:
         """Turn-complete sentinel for interactive-mode JSONL.

@@ -11,6 +11,7 @@ from .config import PTYConfig
 from .events import PTYEvent, EventType
 from .pty_process import PTYProcess
 from .jsonl_reader import JsonlReader
+from .subagents import SubagentTracker
 from .bridge import BridgeHub
 from .exceptions import SessionError
 
@@ -52,6 +53,16 @@ class Session:
         self._resume_existing = resume_existing
         self._pending_prompt: str | None = None
         self._rate_limited_turn = False
+        # Native sub-agent tracking (Agent/Task/Monitor tools in the JSONL)
+        self._tracker = SubagentTracker()
+        # Serializes JSONL reads between send_prompt and the idle watcher
+        self._reader_lock = asyncio.Lock()
+        self._idle_watcher_task: asyncio.Task | None = None
+        # Host callback for events consumed outside send_prompt (autonomous
+        # turns: sub-agent notifications waking the session). Without a
+        # consumer those events used to pile up unread and got misattributed
+        # to the NEXT prompt (task-87 off-by-one incident).
+        self.on_autonomous_event = None  # async (PTYEvent) -> None
 
     @property
     def session_id(self) -> str | None:
@@ -70,6 +81,15 @@ class Session:
     @property
     def jsonl_path(self) -> str | None:
         return self._process.jsonl_path if self._process else None
+
+    @property
+    def has_pending_subagents(self) -> bool:
+        """True while model-spawned sub-agents (Agent/Monitor) are pending.
+
+        Such a session must not be treated as idle/evictable: the main JSONL
+        is silent, but a sub-agent is still working and will wake it.
+        """
+        return self._tracker.has_pending
 
     @property
     def rate_limited(self) -> bool:
@@ -118,7 +138,8 @@ class Session:
         self._pending_prompt = None
 
         self._session_id = self._process.session_id
-        self._reader = JsonlReader(self._process.jsonl_path)
+        self._tracker.set_jsonl_path(self._process.jsonl_path)
+        self._reader = JsonlReader(self._process.jsonl_path, tracker=self._tracker)
 
         await asyncio.sleep(self.config.startup_wait)
         await loop.run_in_executor(None, self._reader.read_new_messages)
@@ -130,6 +151,8 @@ class Session:
 
         self._started = True
         self._last_activity = time.monotonic()
+        if self._idle_watcher_task is None or self._idle_watcher_task.done():
+            self._idle_watcher_task = asyncio.create_task(self._idle_watcher())
         logger.info(
             "Session %s started (pid=%s, cwd=%s, channels=%s)",
             self.session_id,
@@ -226,6 +249,21 @@ class Session:
         timeout = timeout or self.config.response_timeout
         loop = asyncio.get_running_loop()
 
+        # Drain any backlog left by autonomous turns (sub-agent notifications
+        # waking the session while no consumer was attached). Yield it flagged
+        # orphan so the host can log it WITHOUT mistaking it for this turn's
+        # reply, and crucially without counting its stale turn_duration as our
+        # completion sentinel (the task-87 off-by-one). With the idle watcher
+        # running this is normally empty — it is the last line of defense.
+        async with self._reader_lock:
+            backlog = await loop.run_in_executor(
+                None, self._reader.read_new_messages
+            )
+        for raw in backlog:
+            for event in self._reader.normalize(raw, include_user_text=True):
+                event.orphan = True
+                yield event
+
         # Skip sending if prompt was already sent during start() (resume case)
         if self._pending_prompt and self._pending_prompt == text:
             logger.info("Session %s: prompt already sent during start, skipping re-send", self.session_id)
@@ -241,6 +279,12 @@ class Session:
         self._rate_limited_turn = False
         api_error_turn = False
         turn_had_messages = False
+        # Our turn starts only at the JSONL echo of OUR prompt. Until then,
+        # turn_duration sentinels belong to earlier/in-flight turns and must
+        # not complete this one. (If CC was mid-turn when the prompt arrived,
+        # it queues the prompt and echoes it when the new turn begins.)
+        turn_started = False
+        last_subagent_check = 0.0
         # Channel inject "success" is no proof CC consumed the notification
         # (observed in production: inject 13ms after a resume spawn was
         # silently dropped — message blackholed for 30 min). Confirm the turn
@@ -261,12 +305,28 @@ class Session:
                 )
                 break
 
-            messages = await loop.run_in_executor(
-                None, self._reader.read_new_messages
-            )
+            async with self._reader_lock:
+                messages = await loop.run_in_executor(
+                    None, self._reader.read_new_messages
+                )
             if messages:
-                confirm_deadline = None  # turn started — delivery confirmed
                 turn_had_messages = True
+                self._last_activity = time.monotonic()
+                # Any activity (even another turn's) extends the inactivity
+                # deadline: a turn chaining long sub-agent calls must not be
+                # cut at an absolute 30min mark — that re-creates the
+                # unread-backlog misalignment.
+                deadline = time.monotonic() + timeout
+            elif (
+                time.monotonic() - last_subagent_check
+                >= self.config.subagent_check_interval
+            ):
+                last_subagent_check = time.monotonic()
+                if self._tracker.transcripts_grew():
+                    # Main JSONL silent but a sync sub-agent's transcript is
+                    # growing — the turn is alive, keep waiting.
+                    self._last_activity = time.monotonic()
+                    deadline = time.monotonic() + timeout
 
             for raw in messages:
                 if (
@@ -276,11 +336,23 @@ class Session:
                     self._rate_limited_turn = True
                 if raw.get("isApiErrorMessage"):
                     api_error_turn = True
-                for event in self._reader.normalize(raw):
-                    self._last_activity = time.monotonic()
+                if not turn_started:
+                    if self._reader.is_prompt_echo(raw, text):
+                        turn_started = True
+                        confirm_deadline = None  # delivery confirmed
+                    elif raw.get("type") == "queue-operation":
+                        # CC queued our prompt behind an in-flight turn —
+                        # delivered, just not started yet. Don't re-send.
+                        confirm_deadline = None
+                for event in self._reader.normalize(
+                    raw, include_user_text=not turn_started
+                ):
+                    if not turn_started:
+                        # Tail of a previous/in-flight turn, not our reply
+                        event.orphan = True
                     yield event
 
-                if self._reader.is_response_complete(raw):
+                if turn_started and self._reader.is_response_complete(raw):
                     response_complete = True
                     break
 
@@ -372,6 +444,60 @@ class Session:
             )
 
         await asyncio.sleep(self.config.post_response_wait)
+
+    async def _idle_watcher(self) -> None:
+        """Consume JSONL written outside any send_prompt turn.
+
+        The harness wakes a session on its own when background sub-agents
+        (Monitor, background tasks) emit notifications: CC runs full turns
+        with no consumer attached. Without this watcher those events pile up
+        unread and the next send_prompt mistakes them for its own reply
+        (task-87 off-by-one). Events are forwarded to on_autonomous_event
+        flagged autonomous=True; reads also keep idle_seconds honest.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                await asyncio.sleep(self.config.idle_poll_interval)
+                if (
+                    not self._started
+                    or self._reader is None
+                    or self._send_lock.locked()  # send_prompt owns the reader
+                ):
+                    continue
+                async with self._reader_lock:
+                    if self._send_lock.locked():
+                        continue
+                    messages = await loop.run_in_executor(
+                        None, self._reader.read_new_messages
+                    )
+                if not messages:
+                    if self._tracker.transcripts_grew():
+                        self._last_activity = time.monotonic()
+                    continue
+                self._last_activity = time.monotonic()
+                cb = self.on_autonomous_event
+                for raw in messages:
+                    for event in self._reader.normalize(
+                        raw, include_user_text=True
+                    ):
+                        event.autonomous = True
+                        if cb is not None:
+                            try:
+                                await cb(event)
+                            except Exception:
+                                logger.exception(
+                                    "Session %s: autonomous event callback "
+                                    "failed",
+                                    self.session_id,
+                                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Session %s: idle watcher iteration failed",
+                    self.session_id,
+                )
 
     async def send_interrupt(self) -> None:
         if self._process:
@@ -489,6 +615,9 @@ class Session:
         )
 
     async def stop(self) -> None:
+        if self._idle_watcher_task is not None:
+            self._idle_watcher_task.cancel()
+            self._idle_watcher_task = None
         if self._bridge and self.session_id:
             self._bridge.unregister_session(self.session_id)
         if self._process:
