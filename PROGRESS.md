@@ -74,3 +74,12 @@
 - **现象**：turn 进行中 API 返回 Usage Policy 拒绝，CC 写入一条 `isApiErrorMessage: true` 的 assistant 消息后 turn 终止——**不会再写 `turn_duration` 哨兵**。轮询层只认哨兵 → 静默挂到 response_timeout（30 分钟），用户侧无任何反馈。
 - **解决**：与 rate-limit 检测同类处理——session 循环检测 `isApiErrorMessage`，立即 yield 错误事件结束 turn；normalize 时对应 assistant 事件标 `is_error=True`。
 - **教训**：哨兵协议要枚举"哨兵不会来"的所有路径（rate-limit、API error、进程死亡），每条都要有主动终止信号，否则就是静默挂死。
+
+## 2026-06-12 生产 task 87 回复错位复盘（commit 14ce6a0）
+
+### 问题：后台子 agent 唤醒的自主 turn 无人消费，回复永久 +1 错位
+
+- **现象**：模型用内置 Monitor 工具挂了后台监视器并正常结束 turn；之后 harness 用 `<task-notification>` 自主唤醒 session 跑了多个 turn——此时没有任何 consumer 在读 JSONL。用户再发消息时，新 `send_prompt` 读到积压事件，碰到**旧 turn 的 `turn_duration`** 即判"本次回答结束"，把上一个 turn 的输出当回复推给用户。从 07:14 起每条消息的回复都错一位，持续到会话结束（用户同一句话发两遍仍对不上）。
+- **根因**：① turn 结束判定没有和"是哪个 prompt 的 turn"关联；② session 空闲期（自主 turn）完全无人消费 JSONL。
+- **解决**：① `send_prompt` 投递前 drain 积压事件并标 `orphan`，只有看到**本次 prompt 的 user 回显**后才认 `turn_duration`（CC 总会把投递的 prompt 回写为 user 消息，channel 注入带 `<channel>` 包装、stdin 原文，子串匹配即可）；② Session 常驻空闲 watcher，turn 间持续消费自主 turn 并以 `autonomous=True` 经 on_event 上报；③ 顺带把 response_timeout 改为不活动超时（任意 JSONL 行/子 agent transcript 增长都算活动），挂起子 agent 的 session 不被池驱逐。
+- **教训**：**轮询 + 哨兵的协议必须做"会话归属"校验**——哨兵只说明"某个 turn 结束了"，不说明"你的 turn 结束了"。凡是"接收方可能自己说话"的通道（harness 自主唤醒、后台任务通知），都必须有常驻消费者，否则积压必然错位到下一次读取。
