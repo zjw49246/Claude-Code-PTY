@@ -19,7 +19,7 @@ class PTYConfig:
     # sub-agent transcript) advances — NOT an absolute cap, so turns chaining
     # long sub-agent calls aren't cut mid-flight (which would strand unread
     # events and misalign the next turn's reply).
-    response_timeout: float = 1800.0
+    response_timeout: float = 7200.0
     jsonl_poll_interval: float = 0.3
     # Idle watcher: poll interval for consuming autonomous turns (harness
     # wakes the session on background sub-agent notifications) between
