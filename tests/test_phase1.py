@@ -382,7 +382,7 @@ class TestRateLimitDetection:
         assert events[0].is_error is True
 
     async def test_session_ends_turn_on_banner(self, tmp_path):
-        """drain loop 置 rate_limited 后，send_prompt 应以错误事件提前结束。"""
+        """横幅 + turn 零 JSONL 输出（真撞限签名）：静默确认期过后以错误事件结束。"""
         import asyncio
         from claude_pty.session import Session
         from claude_pty.config import PTYConfig
@@ -390,7 +390,8 @@ class TestRateLimitDetection:
 
         session = Session(cwd="/w", session_id="sid-rl",
                           config=PTYConfig(response_timeout=10, post_response_wait=0,
-                                           jsonl_poll_interval=0.01))
+                                           jsonl_poll_interval=0.01,
+                                           rate_limit_confirm_quiet=0.05))
 
         class FakeReader:
             def read_new_messages(self): return []
@@ -404,6 +405,131 @@ class TestRateLimitDetection:
             rate_limited = True  # banner detected
 
             def send_prompt(self, text): pass
+            def clear_rate_limited(self): self.rate_limited = False
+
+        session._process = FakeProc()
+        session._reader = FakeReader()
+        session._started = True
+
+        events = []
+        async for ev in session.send_prompt("hello"):
+            events.append(ev)
+        assert any(ev.is_error and "usage limit reached" in (ev.content or "")
+                   for ev in events)
+        assert session.rate_limited is True
+
+    async def test_banner_false_positive_when_jsonl_flowing(self):
+        """横幅标记被 TUI 渲染的对话正文误中（CCM task 81/82 事故）：turn 有
+        JSONL 活动时不得判限流，应清 flag 并正常完成 turn。"""
+        from claude_pty.session import Session
+        from claude_pty.config import PTYConfig
+
+        session = Session(cwd="/w", session_id="sid-fp",
+                          config=PTYConfig(response_timeout=10, post_response_wait=0,
+                                           jsonl_poll_interval=0.01,
+                                           rate_limit_confirm_quiet=0.05))
+
+        class FakeReader:
+            """第一轮吐 tool_result（内容含 limit 字样），第二轮吐哨兵。"""
+            def __init__(self):
+                self.batches = [
+                    [{"type": "user", "toolUseResult": True}],
+                    [{"type": "system", "subtype": "turn_duration"}],
+                ]
+            def read_new_messages(self):
+                return self.batches.pop(0) if self.batches else []
+            def normalize(self, raw): return []
+            def is_response_complete(self, raw):
+                return raw.get("subtype") == "turn_duration"
+
+        class FakeProc:
+            session_id = "sid-fp"
+            is_alive = True
+            exit_code = None
+            rate_limited = True  # drain loop 误中渲染正文
+
+            def send_prompt(self, text): pass
+            def clear_rate_limited(self): self.rate_limited = False
+
+        proc = FakeProc()
+        session._process = proc
+        session._reader = FakeReader()
+        session._started = True
+
+        events = []
+        async for ev in session.send_prompt("hello"):
+            events.append(ev)
+        assert not any(ev.is_error and "usage limit" in (ev.content or "")
+                       for ev in events)
+        assert proc.rate_limited is False  # 误报已清除
+        assert session.rate_limited is False
+
+    async def test_banner_at_turn_end_does_not_poison_next_turn(self):
+        """turn 末尾才误中横幅、message loop 直接 break：完成时必须清残留
+        flag，否则下一 turn 开局零 JSONL 会被误判真撞限。"""
+        from claude_pty.session import Session
+        from claude_pty.config import PTYConfig
+
+        session = Session(cwd="/w", session_id="sid-st",
+                          config=PTYConfig(response_timeout=10, post_response_wait=0,
+                                           jsonl_poll_interval=0.01,
+                                           rate_limit_confirm_quiet=0.05))
+
+        class FakeReader:
+            def __init__(self):
+                self.batches = [[{"type": "system", "subtype": "turn_duration"}]]
+            def read_new_messages(self):
+                return self.batches.pop(0) if self.batches else []
+            def normalize(self, raw): return []
+            def is_response_complete(self, raw):
+                return raw.get("subtype") == "turn_duration"
+
+        class FakeProc:
+            session_id = "sid-st"
+            is_alive = True
+            exit_code = None
+            rate_limited = True  # turn 末尾误中，banner 分支没机会跑
+
+            def send_prompt(self, text): pass
+            def clear_rate_limited(self): self.rate_limited = False
+
+        proc = FakeProc()
+        session._process = proc
+        session._reader = FakeReader()
+        session._started = True
+
+        async for _ in session.send_prompt("hello"):
+            pass
+        assert proc.rate_limited is False
+        assert session.rate_limited is False
+
+    async def test_structured_jsonl_signal_trusted_immediately(self):
+        """JSONL 结构化 rate_limit_event 不需要静默确认，立即结束 turn。"""
+        from claude_pty.session import Session
+        from claude_pty.config import PTYConfig
+
+        session = Session(cwd="/w", session_id="sid-js",
+                          config=PTYConfig(response_timeout=10, post_response_wait=0,
+                                           jsonl_poll_interval=0.01,
+                                           rate_limit_confirm_quiet=60.0))
+
+        class FakeReader:
+            def __init__(self):
+                self.batches = [[{"type": "rate_limit_event",
+                                  "rate_limit_info": {"status": "rejected"}}]]
+            def read_new_messages(self):
+                return self.batches.pop(0) if self.batches else []
+            def normalize(self, raw): return []
+            def is_response_complete(self, raw): return False
+
+        class FakeProc:
+            session_id = "sid-js"
+            is_alive = True
+            exit_code = None
+            rate_limited = False
+
+            def send_prompt(self, text): pass
+            def clear_rate_limited(self): self.rate_limited = False
 
         session._process = FakeProc()
         session._reader = FakeReader()

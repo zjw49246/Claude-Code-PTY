@@ -11,6 +11,7 @@
 - **输出**：轮询 `~/.claude/projects/<re.sub(r'[^A-Za-z0-9]','-',cwd)>/<session_id>.jsonl`，normalize 成与 CCM StreamParser 对齐的事件
 - **回合结束**：`system/turn_duration` JSONL 哨兵（交互模式每 turn 恰一条，在所有消息之后；没有 result 事件）。例外：`isApiErrorMessage: true` 的 assistant 消息表示 turn 被 API 错误掐断，之后不会再有哨兵——立即以错误事件结束 turn
 - **启动对话框**：spawn 前预写 `.claude.json` trust 条目 + 顶层 `hasCompletedOnboarding/theme`（首次交互模式会弹 theme picker，-p 模式从不弹）（主）+ drain loop 通用 `Entertoconfirm` 自动应答（兜底，剥 ANSI + 折叠空白匹配）
+- **撞限检测**：JSONL 结构化 `rate_limit_event` 立即可信；PTY 横幅扫描**单独不可信**（标记会出现在 TUI 渲染的对话正文里——tool result 引用本仓库源码即误中）：turn 已有 JSONL 活动 → 判误报清 flag 继续；turn 零 JSONL 输出再静默 `rate_limit_confirm_quiet`（默认 15s）才确认；turn 正常完成时清残留 flag 防毒化下一 turn
 - **PTY 职责**：进程保活、Esc 中断、启动应答、输出活动信号（`_last_output`）
 
 历史教训见 PROGRESS.md，待办见 TODO.md。

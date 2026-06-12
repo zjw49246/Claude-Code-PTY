@@ -21,6 +21,12 @@ class PTYConfig:
     # notification reached the channel server). If no JSONL activity appears
     # within this window, the prompt is re-sent via PTY stdin.
     inject_confirm_timeout: float = 15.0
+    # PTY banner scan can match rate-limit phrases rendered from conversation
+    # content (tool results quoting this repo's source, sessions discussing
+    # limits — CCM task 81/82 false-freeze incident). A banner on a turn with
+    # zero JSONL output is only confirmed after this many seconds of continued
+    # JSONL silence; a real refusal produces no JSONL at all.
+    rate_limit_confirm_quiet: float = 15.0
 
     max_sessions: int = 20
     idle_timeout: float = 300.0

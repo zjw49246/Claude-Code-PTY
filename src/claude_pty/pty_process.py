@@ -102,6 +102,12 @@ class PTYProcess:
     def channels_enabled(self) -> bool:
         return self._channel_inject_port is not None
 
+    def clear_rate_limited(self) -> None:
+        """Reset the banner flag after the host judged it a false positive
+        (marker text rendered from conversation content, not a real banner).
+        The drain loop resumes scanning with a fresh buffer."""
+        self.rate_limited = False
+
     def spawn(self, resume_session_id: str | None = None) -> None:
         if resume_session_id:
             self.session_id = resume_session_id
@@ -309,6 +315,7 @@ class PTYProcess:
                                 self.session_id[:8],
                             )
                             self.rate_limited = True
+                            rl_buf = ""  # fresh scan if the host clears the flag
                 if (
                     now < confirm_deadline
                     and now >= cooldown_until

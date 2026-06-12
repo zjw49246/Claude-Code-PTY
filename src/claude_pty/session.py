@@ -78,6 +78,18 @@ class Session:
         proc_flag = bool(self._process and getattr(self._process, "rate_limited", False))
         return proc_flag or self._rate_limited_turn
 
+    def _rate_limit_event(self) -> PTYEvent:
+        return PTYEvent(
+            event_type=EventType.MESSAGE,
+            role="assistant",
+            content=(
+                "usage limit reached — account hit its rate limit "
+                "(detected in PTY session)"
+            ),
+            is_error=True,
+            session_id=self.session_id,
+        )
+
     async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
 
@@ -228,6 +240,7 @@ class Session:
         response_complete = False
         self._rate_limited_turn = False
         api_error_turn = False
+        turn_had_messages = False
         # Channel inject "success" is no proof CC consumed the notification
         # (observed in production: inject 13ms after a resume spawn was
         # silently dropped — message blackholed for 30 min). Confirm the turn
@@ -253,6 +266,7 @@ class Session:
             )
             if messages:
                 confirm_deadline = None  # turn started — delivery confirmed
+                turn_had_messages = True
 
             for raw in messages:
                 if (
@@ -299,23 +313,55 @@ class Session:
                     None, self._process.send_prompt, text
                 )
 
-            # PTY banner scan (drain loop) — end the turn as an error so the
+            # Structured JSONL signal — always trusted: end the turn so the
             # host can rotate accounts instead of waiting out the timeout.
-            if not response_complete and self.rate_limited:
-                yield PTYEvent(
-                    event_type=EventType.MESSAGE,
-                    role="assistant",
-                    content=(
-                        "usage limit reached — account hit its rate limit "
-                        "(detected in PTY session)"
-                    ),
-                    is_error=True,
-                    session_id=self.session_id,
-                )
+            if not response_complete and self._rate_limited_turn:
+                yield self._rate_limit_event()
                 break
+
+            # PTY banner scan (drain loop)。横幅标记也会出现在 TUI 渲染的
+            # 对话正文里（tool result 引用本仓库源码、会话讨论 limit ——
+            # CCM task 81/82 三账号连环误冻事故），所以单凭横幅不可信：
+            # - turn 已有 JSONL 消息在流动 → 误报，清 flag 继续；
+            # - turn 零 JSONL 输出（真撞限的签名：API 直接拒绝，什么都
+            #   不写）→ 再静默 rate_limit_confirm_quiet 秒才确认。
+            if (
+                not response_complete
+                and self._process
+                and getattr(self._process, "rate_limited", False)
+            ):
+                if turn_had_messages:
+                    logger.warning(
+                        "Session %s: rate-limit banner matched rendered "
+                        "conversation content (turn has JSONL activity) — "
+                        "ignoring as false positive",
+                        self.session_id,
+                    )
+                    self._process.clear_rate_limited()
+                elif (
+                    time.monotonic() - self._last_activity
+                    >= self.config.rate_limit_confirm_quiet
+                ):
+                    yield self._rate_limit_event()
+                    break
 
             if not response_complete:
                 await asyncio.sleep(self.config.jsonl_poll_interval)
+
+        # Turn 正常完成 = 没撞限。误报横幅可能在 turn 末尾才被 drain loop
+        # 置位（message loop 内 break，banner 分支没机会跑）——残留 flag 会
+        # 毒化下一 turn（开局零 JSONL，静默够久就被误判真撞限）。
+        if (
+            response_complete
+            and self._process
+            and getattr(self._process, "rate_limited", False)
+        ):
+            logger.warning(
+                "Session %s: rate-limit banner flag set but turn completed "
+                "normally — clearing as false positive",
+                self.session_id,
+            )
+            self._process.clear_rate_limited()
 
         if not response_complete and time.monotonic() >= deadline:
             yield PTYEvent(
