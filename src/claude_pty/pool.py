@@ -57,15 +57,20 @@ class SessionPool:
                 session = self._sessions[session_id]
                 same_config = (
                     config_override is None
-                    or session.config.config_dir == config_override.config_dir
+                    or (
+                        session.config.config_dir == config_override.config_dir
+                        and session.config.default_model == config_override.default_model
+                        and session.config.default_effort == config_override.default_effort
+                    )
                 )
                 if session.is_alive and same_config:
                     return session
                 if session.is_alive:
-                    # config_dir changed (account rotation): the old-account
-                    # session must not be reused — stop it and respawn below.
+                    # config changed (account rotation, model/effort switch):
+                    # the old session must not be reused — stop it and respawn.
                     logger.info(
-                        "Session %s config_dir changed, recreating", session_id
+                        "Session %s config changed (config_dir/model/effort), recreating",
+                        session_id,
                     )
                     await session.stop()
                 del self._sessions[session_id]
