@@ -207,6 +207,31 @@ class CCMBackend(BasePTYBackend):
                         })
                 await db.commit()
 
+            # Empty-reply retry: if chat turn produced only "No response requested."
+            if ec == 0 and instance_id in self._im._launch_params:
+                params = self._im._launch_params[instance_id]
+                if not params.get("_retried"):
+                    try:
+                        assistant_texts = await self._get_recent_assistant_texts(task_id)
+                        combined = " ".join(assistant_texts).strip().lower().rstrip(".")
+                        _NO_RESPONSE = {"no response requested", "no response needed"}
+                        if not assistant_texts or combined in _NO_RESPONSE:
+                            params["_retried"] = True
+                            logger.warning(
+                                "Task %d got empty/non-response (%r), re-enqueueing",
+                                task_id, combined[:80],
+                            )
+                            from backend.main import dispatcher
+                            from backend.services.dispatcher import PRIORITY_USER
+                            await dispatcher.enqueue_message(
+                                task_id=task_id,
+                                prompt=params["prompt"],
+                                priority=PRIORITY_USER,
+                                source="retry",
+                            )
+                    except Exception:
+                        logger.exception("Empty-reply retry check failed for task %s", task_id)
+
             # Broadcast process exit
             await self._im.broadcaster.broadcast(f"task:{task_id}", {
                 "event_type": "process_exit",
@@ -221,6 +246,26 @@ class CCMBackend(BasePTYBackend):
         self._consumers.pop(instance_id, None)
         self._im.processes.pop(instance_id, None)
         self._im._tasks.pop(instance_id, None)
+
+    async def _get_recent_assistant_texts(self, task_id: int) -> list[str]:
+        """Get assistant message texts from the most recent turn (after last user_message)."""
+        from sqlalchemy import select
+        from backend.models.log_entry import LogEntry
+        async with self._im.db_factory() as db:
+            result = await db.execute(
+                select(LogEntry.event_type, LogEntry.role, LogEntry.content)
+                .where(LogEntry.task_id == task_id)
+                .order_by(LogEntry.id.desc())
+                .limit(20)
+            )
+            rows = list(result.all())
+        texts = []
+        for event_type, role, content in rows:
+            if event_type == "user_message":
+                break
+            if event_type in ("message", "result") and role == "assistant" and content:
+                texts.append(content)
+        return texts
 
     async def launch_for_ccm(
         self,
