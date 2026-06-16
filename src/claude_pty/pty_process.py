@@ -9,6 +9,7 @@ import select
 import shutil
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -219,7 +220,12 @@ class PTYProcess:
         """Write .mcp.json with the channel server config."""
         channel_cmd = shutil.which("claude-pty-channel")
         if not channel_cmd:
-            channel_cmd = "claude-pty-channel"
+            # venv bin may not be on PATH (e.g. Worker deployments)
+            venv_bin = os.path.join(os.path.dirname(sys.executable), "claude-pty-channel")
+            if os.path.isfile(venv_bin):
+                channel_cmd = venv_bin
+            else:
+                channel_cmd = "claude-pty-channel"
 
         config = {
             "mcpServers": {
