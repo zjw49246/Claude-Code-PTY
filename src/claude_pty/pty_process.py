@@ -217,12 +217,9 @@ class PTYProcess:
             )
 
     def _setup_mcp_config(self) -> None:
-        """Write pty-bridge MCP config to a per-session temp file.
+        """Write pty-bridge into .mcp.json (required by --dangerously-load-development-channels).
 
-        Uses --mcp-config (session-unique) instead of project .mcp.json
-        so multiple sessions in the same cwd don't clobber each other.
-        If config.mcp_config_path already exists (e.g. CCM skills),
-        the pty-bridge entry is merged into it.
+        Also merge into --mcp-config temp file if one exists (CCM skills etc.).
         """
         channel_cmd = shutil.which("claude-pty-channel")
         if not channel_cmd:
@@ -246,16 +243,10 @@ class PTYProcess:
                 ["--bridge-port", str(self._bridge_port)]
             )
 
-        if self.config.mcp_config_path and os.path.exists(self.config.mcp_config_path):
-            mcp_path = self.config.mcp_config_path
-        else:
-            import tempfile
-            fd, mcp_path = tempfile.mkstemp(
-                prefix=f"pty-mcp-{self.session_id[:8]}-", suffix=".json"
-            )
-            os.close(fd)
-            from dataclasses import replace
-            self.config = replace(self.config, mcp_config_path=mcp_path)
+        # --dangerously-load-development-channels server:pty-bridge reads
+        # from .mcp.json — must write there for Claude to find it.
+        mcp_path = os.path.join(self.cwd, ".mcp.json")
+        self._mcp_config_path = mcp_path
 
         existing = {}
         if os.path.exists(mcp_path):
@@ -271,7 +262,17 @@ class PTYProcess:
 
         with open(mcp_path, "w") as f:
             json.dump(existing, f, indent=2)
-        self._mcp_config_path = mcp_path
+
+        # Also merge pty-bridge into --mcp-config if one exists
+        if self.config.mcp_config_path and os.path.exists(self.config.mcp_config_path):
+            try:
+                with open(self.config.mcp_config_path) as f:
+                    extra = json.load(f)
+                extra.setdefault("mcpServers", {})["pty-bridge"] = bridge_entry
+                with open(self.config.mcp_config_path, "w") as f:
+                    json.dump(extra, f, indent=2)
+            except (json.JSONDecodeError, OSError):
+                pass
 
     def _build_command(self, resume_session_id: str | None) -> list[str]:
         cmd = [self.config.claude_binary]
