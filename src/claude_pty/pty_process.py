@@ -30,7 +30,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-
 # Generic marker for CC startup confirmation dialogs (trust dialog, dev-channels
 # warning, theme picker...). CC renders the TUI with cursor positioning, so
 # visible spaces are not literal spaces — match on whitespace-collapsed text.
-_CONFIRM_MARKERS = ("Entertoconfirm", "Choosethetextstyle")
+_CONFIRM_MARKERS = ("Entertoconfirm", "Choosethetextstyle", "Selectloginmethod")
 _CONFIRM_WINDOW = 60.0  # only auto-confirm during startup (60s for slow Worker init)
 _CONFIRM_COOLDOWN = 0.6  # absorb TUI redraw after answering
 
