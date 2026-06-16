@@ -311,34 +311,37 @@ def _run_inject_server(port: int) -> HTTPServer | None:
 
 def _stdio_loop() -> None:
     """Main loop: read JSON-RPC from stdin, dispatch handlers."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-        method = msg.get("method", "")
+            method = msg.get("method", "")
 
-        if method == "initialize":
-            _handle_initialize(msg)
-        elif method == "notifications/initialized":
-            _initialized.set()
-        elif method == "tools/list":
-            _handle_tools_list(msg)
-        elif method == "tools/call":
-            _handle_tools_call(msg)
-        elif method == "ping":
-            _handle_ping(msg)
-        elif method == "notifications/claude/channel/permission_request":
-            threading.Thread(
-                target=_handle_permission_request,
-                args=(msg,),
-                daemon=True,
-            ).start()
-        # Ignore other notifications/methods silently
+            if method == "initialize":
+                _handle_initialize(msg)
+            elif method == "notifications/initialized":
+                _initialized.set()
+            elif method == "tools/list":
+                _handle_tools_list(msg)
+            elif method == "tools/call":
+                _handle_tools_call(msg)
+            elif method == "ping":
+                _handle_ping(msg)
+            elif method == "notifications/claude/channel/permission_request":
+                threading.Thread(
+                    target=_handle_permission_request,
+                    args=(msg,),
+                    daemon=True,
+                ).start()
+            # Ignore other notifications/methods silently
+    except (EOFError, BrokenPipeError, OSError):
+        pass
 
 
 def main() -> None:
@@ -354,10 +357,20 @@ def main() -> None:
     _bridge_port = args.bridge_port
 
     inject_port = args.port
+    inject_server = None
     if inject_port:
-        _run_inject_server(inject_port)
+        inject_server = _run_inject_server(inject_port)
 
     _stdio_loop()
+
+    # stdin closed (CC shut down MCP) but inject server may still be needed
+    # by the PTY host for prompt delivery — keep alive until the process is
+    # killed by the PTY session teardown.
+    if inject_server is not None:
+        try:
+            threading.Event().wait()
+        except (KeyboardInterrupt, SystemExit):
+            inject_server.shutdown()
 
 
 if __name__ == "__main__":
