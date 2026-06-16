@@ -193,6 +193,8 @@ class PTYProcess:
             # and the session wedges. Mark onboarding complete up front.
             cfg.setdefault("hasCompletedOnboarding", True)
             cfg.setdefault("theme", "dark")
+            if not cfg.get("numStartups"):
+                cfg["numStartups"] = 1
 
             projects = cfg.setdefault("projects", {})
             entry = projects.setdefault(self.cwd, {})
