@@ -191,8 +191,8 @@ class Session:
 
     # Channel server boots with CC's MCP startup; retry injection briefly
     # before falling back to PTY stdin.
-    _INJECT_ATTEMPTS = 5
-    _INJECT_RETRY_INTERVAL = 1.0
+    _INJECT_ATTEMPTS = 15
+    _INJECT_RETRY_INTERVAL = 2.0
 
     async def _deliver_prompt(self, text: str) -> str:
         """Deliver a prompt to CC: channel injection first, stdin fallback.
