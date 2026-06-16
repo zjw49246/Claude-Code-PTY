@@ -217,36 +217,45 @@ class PTYProcess:
             )
 
     def _setup_mcp_config(self) -> None:
-        """Write .mcp.json with the channel server config."""
+        """Write pty-bridge MCP config to a per-session temp file.
+
+        Uses --mcp-config (session-unique) instead of project .mcp.json
+        so multiple sessions in the same cwd don't clobber each other.
+        If config.mcp_config_path already exists (e.g. CCM skills),
+        the pty-bridge entry is merged into it.
+        """
         channel_cmd = shutil.which("claude-pty-channel")
         if not channel_cmd:
-            # venv bin may not be on PATH (e.g. Worker deployments)
             venv_bin = os.path.join(os.path.dirname(sys.executable), "claude-pty-channel")
             if os.path.isfile(venv_bin):
                 channel_cmd = venv_bin
             else:
                 channel_cmd = "claude-pty-channel"
 
-        config = {
-            "mcpServers": {
-                "pty-bridge": {
-                    "command": channel_cmd,
-                    "args": [
-                        "--port",
-                        str(self._channel_inject_port),
-                        "--session-id",
-                        self.session_id,
-                    ],
-                }
-            }
+        bridge_entry = {
+            "command": channel_cmd,
+            "args": [
+                "--port",
+                str(self._channel_inject_port),
+                "--session-id",
+                self.session_id,
+            ],
         }
         if self._bridge_port:
-            config["mcpServers"]["pty-bridge"]["args"].extend(
+            bridge_entry["args"].extend(
                 ["--bridge-port", str(self._bridge_port)]
             )
 
-        mcp_path = os.path.join(self.cwd, ".mcp.json")
-        self._mcp_config_path = mcp_path
+        if self.config.mcp_config_path and os.path.exists(self.config.mcp_config_path):
+            mcp_path = self.config.mcp_config_path
+        else:
+            import tempfile
+            fd, mcp_path = tempfile.mkstemp(
+                prefix=f"pty-mcp-{self.session_id[:8]}-", suffix=".json"
+            )
+            os.close(fd)
+            from dataclasses import replace
+            self.config = replace(self.config, mcp_config_path=mcp_path)
 
         existing = {}
         if os.path.exists(mcp_path):
@@ -257,11 +266,12 @@ class PTYProcess:
                 pass
 
         servers = existing.get("mcpServers", {})
-        servers["pty-bridge"] = config["mcpServers"]["pty-bridge"]
+        servers["pty-bridge"] = bridge_entry
         existing["mcpServers"] = servers
 
         with open(mcp_path, "w") as f:
             json.dump(existing, f, indent=2)
+        self._mcp_config_path = mcp_path
 
     def _build_command(self, resume_session_id: str | None) -> list[str]:
         cmd = [self.config.claude_binary]
