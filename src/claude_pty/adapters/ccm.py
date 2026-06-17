@@ -180,34 +180,13 @@ class CCMBackend(BasePTYBackend):
                 )
                 chat_active_statuses = ["executing", "in_progress", "failed", "pending"]
                 if ec == 0 or interrupted:
-                    # Check for pending native sub-agents before marking completed
-                    has_pending_subagents = False
-                    try:
-                        from backend.models.sub_agent import SubAgentSession
-                        pending = (await db.execute(
-                            select(SubAgentSession).where(
-                                SubAgentSession.task_id == task_id,
-                                SubAgentSession.source == "native",
-                                SubAgentSession.status == "running",
-                            )
-                        )).scalars().all()
-                        has_pending_subagents = len(pending) > 0
-                    except Exception:
-                        pass
-
-                    if has_pending_subagents:
-                        logger.info(
-                            "Task %s has pending native sub-agents, deferring completion",
-                            task_id,
-                        )
-                    else:
-                        result = await db.execute(
-                            update(Task)
-                            .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
-                            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
-                        )
-                        if result.rowcount:
-                            await self._im.broadcaster.broadcast("tasks", {
+                    result = await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
+                        .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
+                    )
+                    if result.rowcount:
+                        await self._im.broadcaster.broadcast("tasks", {
                                 "event": "status_change",
                                 "task_id": task_id,
                                 "new_status": "completed",
