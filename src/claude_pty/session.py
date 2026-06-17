@@ -327,6 +327,16 @@ class Session:
                     # growing — the turn is alive, keep waiting.
                     self._last_activity = time.monotonic()
                     deadline = time.monotonic() + timeout
+                    # Read transcript updates and emit progress events
+                    for update in self._tracker.read_transcript_updates():
+                        yield PTYEvent(
+                            event_type=EventType.SUBAGENT_PROGRESS,
+                            subagent={
+                                "tool_use_id": update["tool_use_id"],
+                                "summary": update["summary"],
+                            },
+                            session_id=self._session_id,
+                        )
 
             for raw in messages:
                 if (

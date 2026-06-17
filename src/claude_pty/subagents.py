@@ -176,6 +176,64 @@ class SubagentTracker:
     def has_pending(self) -> bool:
         return bool(self.pending)
 
+    def read_transcript_updates(self) -> list[dict]:
+        """Read latest content from all active sub-agent transcripts.
+
+        Returns a list of {tool_use_id, agent_id, summary} dicts for
+        sub-agents whose transcripts have new content since the last read.
+        The summary is the last assistant text message (up to 500 chars).
+        """
+        d = self._subagents_dir
+        if not self.pending or not d or not os.path.isdir(d):
+            return []
+        updates = []
+        for tool_use_id, info in self.pending.items():
+            meta = self._lookup_meta(tool_use_id)
+            agent_id = meta.get("agent_id")
+            if not agent_id:
+                continue
+            transcript_path = os.path.join(d, f"agent-{agent_id}.jsonl")
+            if not os.path.exists(transcript_path):
+                continue
+            try:
+                size = os.path.getsize(transcript_path)
+            except OSError:
+                continue
+            fn = f"agent-{agent_id}.jsonl"
+            last_size = self._transcript_sizes.get(fn, 0)
+            if size <= last_size:
+                continue
+            # Read new lines from last known position
+            try:
+                last_text = ""
+                with open(transcript_path, encoding="utf-8") as f:
+                    f.seek(max(0, last_size))
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            raw = json.loads(line)
+                            msg = raw.get("message", {})
+                            if raw.get("type") in ("assistant", "message"):
+                                for block in (msg.get("content") or []):
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        last_text = block["text"]
+                                    elif isinstance(block, dict) and block.get("type") == "tool_use":
+                                        last_text = f"[{block.get('name', 'tool')}]"
+                        except json.JSONDecodeError:
+                            continue
+                if last_text:
+                    updates.append({
+                        "tool_use_id": tool_use_id,
+                        "agent_id": agent_id,
+                        "summary": last_text[:500],
+                    })
+                self._transcript_sizes[fn] = size
+            except OSError:
+                continue
+        return updates
+
     def transcripts_grew(self) -> bool:
         """True when any sub-agent transcript grew since the last call.
 
