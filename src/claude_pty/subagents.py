@@ -235,16 +235,15 @@ class SubagentTracker:
         return updates
 
     def transcripts_grew(self) -> bool:
-        """True when any sub-agent transcript grew since the last call.
+        """True when any sub-agent transcript grew since the last check.
 
-        Used as an activity signal: the main JSONL is silent while the model
-        waits on a sync sub-agent, but the agent's own transcript keeps
-        growing — the session must not be considered idle then.
+        Does NOT update cached sizes — read_transcript_updates() does that
+        after reading content. This prevents the race where grew() consumes
+        the size delta before read() can use it.
         """
         d = self._subagents_dir
         if not self.pending or not d or not os.path.isdir(d):
             return False
-        grew = False
         try:
             for fn in os.listdir(d):
                 if not fn.endswith(".jsonl"):
@@ -254,9 +253,8 @@ class SubagentTracker:
                     size = os.path.getsize(path)
                 except OSError:
                     continue
-                if size != self._transcript_sizes.get(fn):
-                    self._transcript_sizes[fn] = size
-                    grew = True
+                if size != self._transcript_sizes.get(fn, 0):
+                    return True
         except OSError:
             return False
-        return grew
+        return False
