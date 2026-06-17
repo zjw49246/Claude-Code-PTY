@@ -109,39 +109,57 @@ class PTYProcess:
         The drain loop resumes scanning with a fresh buffer."""
         self.rate_limited = False
 
+    # Per-cwd lock: serialize .mcp.json write + CC spawn to prevent
+    # race conditions when multiple sessions share the same project dir.
+    _cwd_spawn_locks: dict[str, threading.Lock] = {}
+    _cwd_spawn_locks_lock = threading.Lock()
+
     def spawn(self, resume_session_id: str | None = None) -> None:
         if resume_session_id:
             self.session_id = resume_session_id
 
         self.rate_limited = False
         self._pretrust_workdir()
-        if self._channel_inject_port:
-            self._setup_mcp_config()
 
-        master, slave = pty.openpty()
-        winsize = struct.pack(
-            "HHHH", self.config.terminal_rows, self.config.terminal_cols, 0, 0
-        )
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
+        # Acquire per-cwd lock: .mcp.json write + CC spawn must be atomic
+        # so a concurrent session on the same cwd doesn't overwrite between
+        # our write and CC's read.
+        with self._cwd_spawn_locks_lock:
+            if self.cwd not in self._cwd_spawn_locks:
+                self._cwd_spawn_locks[self.cwd] = threading.Lock()
+            cwd_lock = self._cwd_spawn_locks[self.cwd]
 
-        env = build_clean_env(self.config)
-        cmd = self._build_command(resume_session_id)
+        with cwd_lock:
+            if self._channel_inject_port:
+                self._setup_mcp_config()
 
-        try:
-            self.proc = subprocess.Popen(
-                cmd,
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                start_new_session=True,
-                close_fds=True,
-                cwd=self.cwd,
-                env=env,
+            master, slave = pty.openpty()
+            winsize = struct.pack(
+                "HHHH", self.config.terminal_rows, self.config.terminal_cols, 0, 0
             )
-        except Exception as e:
-            os.close(master)
-            os.close(slave)
-            raise PTYSpawnError(f"Failed to spawn Claude Code: {e}") from e
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
+
+            env = build_clean_env(self.config)
+            cmd = self._build_command(resume_session_id)
+
+            try:
+                self.proc = subprocess.Popen(
+                    cmd,
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=slave,
+                    start_new_session=True,
+                    close_fds=True,
+                    cwd=self.cwd,
+                    env=env,
+                )
+            except Exception as e:
+                os.close(master)
+                os.close(slave)
+                raise PTYSpawnError(f"Failed to spawn Claude Code: {e}") from e
+
+            # Brief wait for CC to read .mcp.json before releasing lock
+            time.sleep(0.5)
 
         os.close(slave)
         self.master_fd = master
