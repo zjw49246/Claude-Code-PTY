@@ -180,18 +180,39 @@ class CCMBackend(BasePTYBackend):
                 )
                 chat_active_statuses = ["executing", "in_progress", "failed", "pending"]
                 if ec == 0 or interrupted:
-                    result = await db.execute(
-                        update(Task)
-                        .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
-                        .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
-                    )
-                    if result.rowcount:
-                        await self._im.broadcaster.broadcast("tasks", {
-                            "event": "status_change",
-                            "task_id": task_id,
-                            "new_status": "completed",
-                            "instance_id": instance_id,
-                        })
+                    # Check for pending native sub-agents before marking completed
+                    has_pending_subagents = False
+                    try:
+                        from backend.models.sub_agent import SubAgentSession
+                        pending = (await db.execute(
+                            select(SubAgentSession).where(
+                                SubAgentSession.task_id == task_id,
+                                SubAgentSession.source == "native",
+                                SubAgentSession.status == "running",
+                            )
+                        )).scalars().all()
+                        has_pending_subagents = len(pending) > 0
+                    except Exception:
+                        pass
+
+                    if has_pending_subagents:
+                        logger.info(
+                            "Task %s has pending native sub-agents, deferring completion",
+                            task_id,
+                        )
+                    else:
+                        result = await db.execute(
+                            update(Task)
+                            .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
+                            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
+                        )
+                        if result.rowcount:
+                            await self._im.broadcaster.broadcast("tasks", {
+                                "event": "status_change",
+                                "task_id": task_id,
+                                "new_status": "completed",
+                                "instance_id": instance_id,
+                            })
                 else:
                     result = await db.execute(
                         update(Task)
@@ -290,12 +311,17 @@ class CCMBackend(BasePTYBackend):
             disallowed.append("Workflow")
         if enabled_skills:
             try:
-                from backend.services.command_registry import COMMAND_REGISTRY
-                for skill, enabled in enabled_skills.items():
-                    if enabled and skill in COMMAND_REGISTRY:
-                        disallowed.extend(COMMAND_REGISTRY[skill].disallowed_builtins)
+                from backend.services.skill_loader import discover_skills, get_skill_disallowed_tools
+                skills = discover_skills(project_dir=cwd)
+                disallowed.extend(get_skill_disallowed_tools(skills, enabled_skills))
             except ImportError:
-                pass
+                try:
+                    from backend.services.command_registry import COMMAND_REGISTRY
+                    for skill, enabled in enabled_skills.items():
+                        if enabled and skill in COMMAND_REGISTRY:
+                            disallowed.extend(COMMAND_REGISTRY[skill].disallowed_builtins)
+                except ImportError:
+                    pass
 
         logger.info("launch_for_ccm: instance=%s mcp_config=%s skills=%s resume=%s",
                     instance_id, mcp_config_path, enabled_skills, resume_session_id)
