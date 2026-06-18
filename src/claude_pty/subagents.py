@@ -237,13 +237,14 @@ class SubagentTracker:
     def transcripts_grew(self) -> bool:
         """True when any sub-agent transcript grew since the last check.
 
-        Does NOT update cached sizes — read_transcript_updates() does that
-        after reading content. This prevents the race where grew() consumes
-        the size delta before read() can use it.
+        Updates cached sizes so consecutive calls without actual growth
+        return False. read_transcript_updates() also updates sizes after
+        reading content, so the two methods stay in sync.
         """
         d = self._subagents_dir
         if not self.pending or not d or not os.path.isdir(d):
             return False
+        grew = False
         try:
             for fn in os.listdir(d):
                 if not fn.endswith(".jsonl"):
@@ -254,7 +255,8 @@ class SubagentTracker:
                 except OSError:
                     continue
                 if size != self._transcript_sizes.get(fn, 0):
-                    return True
+                    self._transcript_sizes[fn] = size
+                    grew = True
         except OSError:
             return False
-        return False
+        return grew
