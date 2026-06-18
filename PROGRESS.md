@@ -1,5 +1,73 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-06-18 三个 PTY 模式 bug 的分析与修复
+
+### Bug 1: CC Auto Compact 导致上下文丢失（task 660 / ccm-zhoujunwei）
+
+**现象**: PTY 模式下 task "没有上下文"，关掉 PTY 后恢复正常。
+
+**根因**: Claude Code 内置了 auto compact 机制。PTY 模式下 CC 进程**跨 turn 持久存活**，context 持续累积。task 660 累积到 224,838 tokens 后，CC 在 turn 之间（用户没发消息、session 空闲时）自动触发了 compact，把历史压成摘要。
+
+非 PTY 模式下每个 turn 是独立的 `claude -p` 进程，进程退出即释放，CC 没机会在 turn 之间 auto compact。
+
+**CC auto compact 触发条件**（从 CC 二进制逆向分析）:
+
+- 核心判断: `if (currentTokens > autoCompactThreshold) { compact() }`
+- `autoCompactThreshold` 由 `wv8(model, autoCompactWindow)` 函数计算
+- `autoCompactWindow` 可配置，范围 100K-1M
+- 可通过环境变量 `DISABLE_AUTO_COMPACT=true` 禁用
+- 有多种 compact 类型: `compact_auto`、`compact_reactive`、`compact_manual`、`compact_partial`
+- 有防抖机制: `compact_auto_rapid_refill_breaker`
+
+**为什么 CCM 的 90% 检查没先触发**: CCM 的检查在 `_process_queued_message()` 中——只有用户发新消息时才检查。CC 的 auto compact 在空闲期触发，CCM 根本没机会介入。而且 task 660 是 1M 模型，224K 只占 22.5%，远没到 90%。
+
+**修复**: `commit cf14e98`，PTY `_env.py` 中设 `DISABLE_AUTO_COMPACT=true`。
+
+---
+
+### Bug 2: CCM Compact 误判 1M 模型窗口大小（task 700 / ccm-xiaoyu）
+
+**现象**: Task session 被意外切换，context 显示 utilization 3863%。
+
+**根因**: CCM compact 检查中 `context_window` 值来自 CC 事件上报，但 CC 对 1M 模型可能上报 200K。
+
+```python
+window = usage.get("context_window") or 200_000  # CC 上报的可能就是 200K
+```
+
+220K tokens / 200K window = 110%（触发 compact），而实际应该是 220K / 1M = 22%。
+
+CCM 的 `_process_event` 中已有 `_model_context_window()` 兜底（检测 `[1m]` 返回 1M），但只在**写入**时生效。compact **读取判断**时没做同样兜底，直接用了可能已错误的存储值。
+
+**修复**: `commit fe36e0d`，compact 检查时也用模型名兜底窗口大小。
+
+---
+
+### Bug 3: Chat 消息重放——回复完又处理第一条消息（task 633 / ccm-xiaoyu, task 92 / 本机）
+
+**现象**: 给 task 发消息后 Claude 先正确回复，然后又开始执行 task 的原始 description。通常在 PTY 刚开启或中断重启时出现。
+
+**根因**: PTY chat 消息处理流程:
+
+1. `send_prompt("用户消息")` 注入，CC 处理，turn 结束（`result` 事件）
+2. `_consume` 协程完成，调用 `on_exit`
+3. **CC 进程还活着**（PTY session 持久），处于交互模式等待输入
+4. CC 因 session 状态（JSONL 中的 `last-prompt`、stale session 重建后的初始 description）开始自主处理旧 prompt
+5. idle watcher 检测到 JSONL 增长 → `on_autonomous_event` 回调 → 事件写入 log_entries → 前端显示重放
+
+该机制本来是为 Monitor/background agent 设计的（CC 收到 `<task-notification>` 后自主处理），但 chat 场景下意外转发了 CC 重放旧 prompt 的事件。
+
+**为什么 CC 会重放旧 prompt**:
+- JSONL 被 compact/换号/重建后，CC `--resume` 加载到不完整的上下文
+- JSONL 中的 `last-prompt` 条目保存了之前的 prompt（可能是 task description）
+- CC 交互模式 `--resume` 时，处理完 inject 消息后检查到未完成的工作，自动继续
+
+**修复**: `commit 6fff435`，chat turn 的 `on_exit` 中将 `session.on_autonomous_event` 设为 `None`，阻止后续自主 turn 事件被转发。下次 launch 时 callback 重新绑定。
+
+**Commits**: cf14e98, fe36e0d, 6fff435
+
+---
+
 ## 2026-06-12 限流横幅误报连环冻结三个健康账号（CCM task 81/82）
 
 ### 问题：会话讨论 rate limit / 读本仓库源码就被判"撞限"
