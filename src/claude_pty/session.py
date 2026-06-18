@@ -144,6 +144,26 @@ class Session:
         await asyncio.sleep(self.config.startup_wait)
         await loop.run_in_executor(None, self._reader.read_new_messages)
 
+        # CC --resume in interactive mode auto-generates a "Continue from
+        # where you left off." turn. Wait for it to finish (turn_duration
+        # sentinel) before returning, so send_prompt doesn't race with it.
+        if resume_id:
+            settle_deadline = time.monotonic() + 30
+            while time.monotonic() < settle_deadline and getattr(self._process, "is_alive", False):
+                await asyncio.sleep(1.0)
+                msgs = await loop.run_in_executor(
+                    None, self._reader.read_new_messages
+                )
+                if not msgs:
+                    continue
+                has_turn_end = any(
+                    m.get("type") == "system"
+                    and m.get("subtype") == "turn_duration"
+                    for m in msgs
+                )
+                if has_turn_end:
+                    break
+
         if self._bridge and self._channel_inject_port:
             self._bridge.register_session(
                 self._process.session_id, self._channel_inject_port
