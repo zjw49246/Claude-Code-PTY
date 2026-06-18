@@ -24,6 +24,7 @@ def build_clean_env(config: PTYConfig) -> dict[str, str]:
             del env[key]
 
     env.update(_FORCE_SET)
+    env["DISABLE_AUTO_COMPACT"] = "true"
 
     if config.config_dir:
         default_dir = os.path.expanduser("~/.claude")
