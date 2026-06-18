@@ -29,6 +29,9 @@ MONITOR_TOOL_NAMES = frozenset({"Monitor"})
 
 _MONITOR_TASK_RE = re.compile(r"\(task (\S+?)[,)]")
 _NOTIFICATION_TASK_RE = re.compile(r"<task-id>\s*(\S+?)\s*</task-id>")
+_NOTIFICATION_STATUS_RE = re.compile(r"<status>\s*(\S+?)\s*</status>")
+_NOTIFICATION_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+_AGENT_ID_RE = re.compile(r"agentId:\s*(\S+)")
 _MONITOR_TIMEOUT_MARKER = "Monitor timed out"
 
 
@@ -115,6 +118,17 @@ class SubagentTracker:
                 self._monitor_tasks[m.group(1)] = tool_use_id
             return None
 
+        # Background Agent: tool_result is just "Async agent launched",
+        # not completion. Keep pending like Monitor; real completion
+        # arrives via <task-notification>.
+        if info.get("background"):
+            m = _AGENT_ID_RE.search(output or "")
+            if m:
+                agent_id = m.group(1)
+                info["harness_task_id"] = agent_id
+                self._monitor_tasks[agent_id] = tool_use_id
+            return None
+
         del self.pending[tool_use_id]
         done = dict(info)
         done.update(self._lookup_meta(tool_use_id))
@@ -135,13 +149,29 @@ class SubagentTracker:
         if not tool_use_id or tool_use_id not in self.pending:
             return None
         info = self.pending[tool_use_id]
+        status_m = _NOTIFICATION_STATUS_RE.search(text)
+        summary_m = _NOTIFICATION_SUMMARY_RE.search(text)
+        status_val = status_m.group(1) if status_m else ""
+        summary_text = summary_m.group(1).strip() if summary_m else ""
+
         if _MONITOR_TIMEOUT_MARKER in text:
             del self.pending[tool_use_id]
             self._monitor_tasks.pop(m.group(1), None)
             done = dict(info)
             done["timed_out"] = True
             return {"event": "done", **done}
-        return {"event": "progress", **dict(info), "summary": text[:2000]}
+
+        if status_val in ("completed", "killed"):
+            del self.pending[tool_use_id]
+            self._monitor_tasks.pop(m.group(1), None)
+            done = dict(info)
+            if status_val == "killed":
+                done["timed_out"] = True
+            if summary_text:
+                done["summary"] = summary_text
+            return {"event": "done", **done}
+
+        return {"event": "progress", **dict(info), "summary": summary_text or text[:2000]}
 
     # ----------------------------------------------------------------- extras
 
