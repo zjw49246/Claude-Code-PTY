@@ -149,6 +149,7 @@ class Session:
         # sentinel) before returning, so send_prompt doesn't race with it.
         if resume_id:
             settle_deadline = time.monotonic() + 30
+            settled = False
             while time.monotonic() < settle_deadline and getattr(self._process, "is_alive", False):
                 await asyncio.sleep(1.0)
                 msgs = await loop.run_in_executor(
@@ -162,7 +163,18 @@ class Session:
                     for m in msgs
                 )
                 if has_turn_end:
+                    settled = True
                     break
+            if not settled and hasattr(self._process, "is_alive") and not self._process.is_alive:
+                ec = getattr(self._process, "exit_code", None)
+                logger.warning(
+                    "Session %s: process died during resume settle (exit_code=%s)",
+                    self.session_id, ec,
+                )
+                raise SessionError(
+                    f"Session {self.session_id} process died during resume "
+                    f"(exit_code={ec}) — likely auth failure or stale session"
+                )
 
         if self._bridge and self._channel_inject_port:
             self._bridge.register_session(
