@@ -144,14 +144,22 @@ class CCMBackend(BasePTYBackend):
         chat_initiated = context.get("chat_initiated", False)
         task_id = context.get("task_id")
 
-        # Chat turn finished: mute the session's autonomous callback so CC
-        # doesn't replay stale prompts (e.g. the original task description)
-        # through the idle watcher. The session stays alive for future turns
-        # but won't forward unsolicited events until the next send_prompt.
+        # Chat turn finished: replace the full autonomous callback with a
+        # lightweight one that only processes sub-agent completions (task-
+        # notifications). This prevents replaying stale prompts while still
+        # allowing background Agent completions to mark sub-agents as done.
         if chat_initiated:
             session = self._sessions.get(instance_id)
             if session:
-                session.on_autonomous_event = None
+                async def _subagent_only_callback(event_dict, **ctx):
+                    if event_dict.get("subagent") and event_dict.get("event_type", "").startswith("subagent_"):
+                        try:
+                            await self._im._upsert_native_sub_agent(
+                                task_id, event_dict["event_type"], event_dict["subagent"]
+                            )
+                        except Exception:
+                            pass
+                session.on_autonomous_event = _subagent_only_callback
 
         # For chat-initiated runs, replicate _consume_output() status management
         if chat_initiated and task_id and instance_id not in self._im._stopping:
