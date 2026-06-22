@@ -161,6 +161,15 @@ class CCMBackend(BasePTYBackend):
                             pass
                 session.on_autonomous_event = _subagent_only_callback
 
+                # Start background transcript polling for sub-agent progress
+                if hasattr(session, '_reader') and hasattr(session._reader, '_tracker'):
+                    tracker = session._reader._tracker
+                    if tracker.has_pending:
+                        import asyncio
+                        asyncio.create_task(
+                            self._poll_subagent_transcripts(tracker, task_id)
+                        )
+
         # For chat-initiated runs, replicate _consume_output() status management
         if chat_initiated and task_id and instance_id not in self._im._stopping:
             from sqlalchemy import update
@@ -283,6 +292,29 @@ class CCMBackend(BasePTYBackend):
             if event_type in ("message", "result") and role == "assistant" and content:
                 texts.append(content)
         return texts
+
+    async def _poll_subagent_transcripts(self, tracker, task_id: int):
+        """Poll sub-agent transcripts every 5s and emit progress events."""
+        import asyncio
+        try:
+            while tracker.has_pending:
+                updates = tracker.read_transcript_updates()
+                for u in updates:
+                    info = {
+                        "tool_use_id": u["tool_use_id"],
+                        "summary": u.get("summary", ""),
+                    }
+                    try:
+                        await self._im._upsert_native_sub_agent(
+                            task_id, "subagent_progress", info
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.debug("subagent transcript poll stopped for task %s", task_id)
 
     async def launch_for_ccm(
         self,
