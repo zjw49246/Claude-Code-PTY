@@ -29,6 +29,11 @@ class _PTYProcessProxy:
     The dispatcher calls process.wait() and reads process.returncode; on task
     timeout it calls kill() and awaits wait() again. kill()/terminate() must
     therefore actually tear the PTY session down and unblock wait().
+
+    The dispatcher holds a direct reference to the proxy it launched with, so
+    when pool rotation retries the same logical turn on a fresh proxy the old
+    one must be `chain`ed to the new one — otherwise the dispatcher waits on
+    an Event nobody will ever set (until the task-level timeout fires).
     """
 
     def __init__(self, on_kill=None):
@@ -36,14 +41,36 @@ class _PTYProcessProxy:
         self.returncode: int | None = None
         self.pid = 0
         self._on_kill = on_kill
+        self._chained: "_PTYProcessProxy | None" = None
+        # The Session this proxy was launched with (bound by launch_for_ccm).
+        # Exits and kills use it to tell THIS turn's registrations apart from
+        # a newer occupant of the same instance slot.
+        self.session = None
 
     async def wait(self) -> int:
         await self._done.wait()
         return self.returncode or 0
 
     def complete(self, exit_code: int | None = 0):
+        if self._done.is_set():
+            return
         self.returncode = exit_code if exit_code is not None else 0
         self._done.set()
+        chained, self._chained = self._chained, None
+        if chained is not None:
+            chained.complete(self.returncode)
+
+    def chain(self, proxy: "_PTYProcessProxy") -> None:
+        """Forward this proxy's eventual completion to `proxy`.
+
+        Pool rotation relaunches the same logical turn on a fresh proxy while
+        the dispatcher still awaits the original one; the retry's outcome
+        must propagate there.
+        """
+        if self._done.is_set():
+            proxy.complete(self.returncode)
+        else:
+            self._chained = proxy
 
     def kill(self):
         if self._done.is_set():
@@ -87,8 +114,28 @@ class CCMBackend(BasePTYBackend):
         self._im = instance_manager
         self._proxies: dict[int, _PTYProcessProxy] = {}
 
-    async def _force_kill(self, instance_id: int) -> None:
-        """Tear down a session after proxy.kill() (dispatcher timeout)."""
+    async def _force_kill(self, instance_id: int, expected=None) -> None:
+        """Tear down a session after proxy.kill() (dispatcher timeout).
+
+        `expected` is the Session the killed proxy was launched with. By the
+        time a task-level timeout fires, the instance slot may already host a
+        newer turn (rotation relaunch, slot reuse); tearing the slot down
+        blindly would kill that innocent live session. On a mismatch only the
+        expected session is stopped and the occupant is left alone.
+        """
+        if expected is not None:
+            current = self._sessions.get(instance_id)
+            if current is not None and current is not expected:
+                try:
+                    await expected.stop()
+                except Exception:
+                    logger.exception(
+                        "Failed to stop PTY session for instance %s", instance_id
+                    )
+                sid = expected.session_id
+                if sid and await self._pool.get(sid) is expected:
+                    await self._pool.remove(sid)
+                return
         consumer = self._consumers.pop(instance_id, None)
         if consumer and not consumer.done():
             consumer.cancel()
@@ -143,13 +190,20 @@ class CCMBackend(BasePTYBackend):
         instance_id = key
         chat_initiated = context.get("chat_initiated", False)
         task_id = context.get("task_id")
+        # The session this exiting consumer ran (passed by _consume). The
+        # instance-keyed dicts may already describe a NEWER turn — rotation
+        # relaunches inline, and a concurrent launch can reuse the slot — so
+        # everything below must work on identities, not on dict lookups.
+        session = context.get("session") or self._sessions.get(instance_id)
+        own_proxy = getattr(session, "_ccm_proxy", None) if session else None
+        if own_proxy is None:
+            own_proxy = self._proxies.get(instance_id)
 
         # Chat turn finished: replace the full autonomous callback with a
         # lightweight one that only processes sub-agent completions (task-
         # notifications). This prevents replaying stale prompts while still
         # allowing background Agent completions to mark sub-agents as done.
         if chat_initiated:
-            session = self._sessions.get(instance_id)
             if session:
                 async def _subagent_only_callback(event_dict, **ctx):
                     if event_dict.get("subagent") and event_dict.get("event_type", "").startswith("subagent_"):
@@ -165,7 +219,6 @@ class CCMBackend(BasePTYBackend):
                 if hasattr(session, '_reader') and hasattr(session._reader, '_tracker'):
                     tracker = session._reader._tracker
                     if tracker.has_pending:
-                        import asyncio
                         asyncio.create_task(
                             self._poll_subagent_transcripts(tracker, task_id)
                         )
@@ -186,11 +239,26 @@ class CCMBackend(BasePTYBackend):
                         instance_id, task_id, ec, ""
                     )
                     if rotated:
-                        proxy = self._proxies.pop(instance_id, None)
-                        if proxy:
-                            proxy.complete(ec)
-                        self._sessions.pop(instance_id, None)
-                        self._consumers.pop(instance_id, None)
+                        # A successful rotation relaunched this same logical
+                        # turn inline: _proxies/_sessions/_consumers now
+                        # describe the RETRY, not this exiting turn, so there
+                        # is nothing of ours left to pop. The dispatcher still
+                        # awaits own_proxy (a direct reference from launch
+                        # time) — forward the retry's eventual outcome to it.
+                        # Completing own_proxy here would wake the dispatcher
+                        # mid-retry; popping the dicts (pre-fix behaviour)
+                        # deregistered the live retry AND completed the wrong
+                        # proxy, leaving own_proxy pending until the task
+                        # timeout while follow-up messages queued unconsumed.
+                        new_proxy = self._proxies.get(instance_id)
+                        if own_proxy is not None:
+                            if new_proxy is not None and new_proxy is not own_proxy:
+                                new_proxy.chain(own_proxy)
+                            else:
+                                # Rotation reported success but no fresh proxy
+                                # is registered — never leave the dispatcher
+                                # hanging on an event nobody will set.
+                                own_proxy.complete(ec)
                         return
                 except Exception:
                     logger.exception("Pool rotation check failed for instance %s", instance_id)
@@ -265,13 +333,25 @@ class CCMBackend(BasePTYBackend):
                 "stderr": None,
             })
 
-        proxy = self._proxies.pop(instance_id, None)
-        if proxy:
-            proxy.complete(exit_code)
-        self._sessions.pop(instance_id, None)
-        self._consumers.pop(instance_id, None)
-        self._im.processes.pop(instance_id, None)
-        self._im._tasks.pop(instance_id, None)
+        # Identity-guarded cleanup: pop only entries that still belong to THIS
+        # turn. A newer launch may have re-registered the slot while we were
+        # exiting (rotation relaunch, launch_for_ccm stale-session takeover);
+        # popping blindly would deregister its live session, and completing
+        # the dict's proxy would wake the wrong dispatcher while ours hangs.
+        if self._proxies.get(instance_id) is own_proxy:
+            self._proxies.pop(instance_id, None)
+        if own_proxy is not None:
+            own_proxy.complete(exit_code)
+        if self._sessions.get(instance_id) is session:
+            self._sessions.pop(instance_id, None)
+        cur_consumer = self._consumers.get(instance_id)
+        if cur_consumer is None or cur_consumer is asyncio.current_task():
+            self._consumers.pop(instance_id, None)
+        if self._im.processes.get(instance_id) is own_proxy:
+            self._im.processes.pop(instance_id, None)
+        cur_task = self._im._tasks.get(instance_id)
+        if cur_task is None or cur_task is asyncio.current_task():
+            self._im._tasks.pop(instance_id, None)
 
     async def _get_recent_assistant_texts(self, task_id: int) -> list[str]:
         """Get assistant message texts from the most recent turn (after last user_message)."""
@@ -380,8 +460,11 @@ class CCMBackend(BasePTYBackend):
                 old_consumer.cancel()
 
         proxy = _PTYProcessProxy(
+            # `proxy.session` is late-bound below, so a timeout kill tears
+            # down the session this proxy actually launched — not whatever
+            # occupies the instance slot by the time the timeout fires.
             on_kill=lambda: asyncio.get_event_loop().create_task(
-                self._force_kill(instance_id)
+                self._force_kill(instance_id, expected=proxy.session)
             )
         )
         self._proxies[instance_id] = proxy
@@ -404,10 +487,15 @@ class CCMBackend(BasePTYBackend):
             mcp_config_path=mcp_config_path,
         )
 
-        # Surface the real PTY pid on the proxy (Instance.pid bookkeeping)
+        # Bind proxy↔session both ways so exits/kills can tell this turn's
+        # registrations apart from a newer occupant of the same slot, and
+        # surface the real PTY pid on the proxy (Instance.pid bookkeeping).
         sess = self._sessions.get(instance_id)
-        if sess is not None and sess._process is not None:
-            proxy.pid = sess._process.pid or 0
+        if sess is not None:
+            proxy.session = sess
+            sess._ccm_proxy = proxy
+            if sess._process is not None:
+                proxy.pid = sess._process.pid or 0
 
         consumer = self._consumers.get(instance_id)
         if consumer:

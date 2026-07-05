@@ -109,7 +109,11 @@ class BasePTYBackend:
                 # rotation kicks in (it triggers on non-zero exit).
                 exit_code = 1
             logger.info("PTY consumer exiting for key=%s, exit_code=%s", key, exit_code)
-            await self.on_exit(key, exit_code, **kwargs)
+            # Pass our session so on_exit can distinguish this turn's
+            # registrations from a newer launch that reused the same key
+            # (rotation relaunch / slot takeover) — dict lookups by key are
+            # ambiguous by then.
+            await self.on_exit(key, exit_code, session=session, **kwargs)
 
     async def stop(self, key: Any) -> None:
         session = self._sessions.get(key)
