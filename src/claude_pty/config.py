@@ -42,6 +42,14 @@ class PTYConfig:
     max_sessions: int = 20
     idle_timeout: float = 300.0
 
+    # Periodic idle reaper: sessions idle at least this long are stopped and
+    # removed even while the pool is under max_sessions. Without it, idle
+    # sessions are only reclaimed on pool overflow and otherwise sit resident
+    # forever (a full `claude` process each, hundreds of MB). 0 disables.
+    idle_reap_after: float = 7200.0
+    # How often the reaper scans the pool.
+    idle_reap_interval: float = 300.0
+
     max_restart_attempts: int = 3
     restart_backoff_base: float = 2.0
 

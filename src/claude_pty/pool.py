@@ -26,6 +26,7 @@ class SessionPool:
         self._sessions: dict[str, Session] = {}
         self._access_order: dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self._reaper_task: asyncio.Task | None = None
 
     @staticmethod
     def _allocate_inject_port() -> int:
@@ -50,6 +51,9 @@ class SessionPool:
         initial_prompt: str | None = None,
         resume: bool = False,
     ) -> Session:
+        # Lazily started here (not in __init__) so a running event loop is
+        # guaranteed; hosts construct the pool at import/startup time.
+        self._ensure_reaper()
         async with self._lock:
             self._access_order[session_id] = time.monotonic()
 
@@ -171,7 +175,58 @@ class SessionPool:
                 logger.info("Drained %d idle session(s)", stopped)
             return stopped
 
+    def _ensure_reaper(self) -> None:
+        """Start the periodic idle reaper if enabled and not yet running."""
+        if self.config.idle_reap_after <= 0:
+            return
+        if self._reaper_task is not None and not self._reaper_task.done():
+            return
+        self._reaper_task = asyncio.create_task(self._reap_loop())
+
+    async def _reap_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.idle_reap_interval)
+            try:
+                await self.reap_idle()
+            except Exception:
+                logger.exception("Idle reaper scan failed")
+
+    async def reap_idle(self) -> int:
+        """Stop and remove sessions idle for at least `idle_reap_after`.
+
+        Unlike overflow eviction (`_evict_one`, which only runs when the pool
+        is full) this reclaims resident-but-unused sessions on a schedule.
+        Mid-prompt sessions and sessions awaiting native sub-agents are never
+        touched; a reaped session's context survives on disk, so the next
+        message on it simply cold-resumes.
+        """
+        async with self._lock:
+            expired = [
+                sid for sid, session in self._sessions.items()
+                if session.idle_seconds >= self.config.idle_reap_after
+                and not session._send_lock.locked()
+                and not session.has_pending_subagents
+            ]
+            reaped = 0
+            for sid in expired:
+                session = self._sessions.pop(sid)
+                self._access_order.pop(sid, None)
+                idle = session.idle_seconds
+                try:
+                    await session.stop()
+                except Exception:
+                    logger.exception("Failed to stop idle session %s", sid)
+                reaped += 1
+                logger.info(
+                    "Reaped idle session %s (idle %.0fs >= %.0fs)",
+                    sid, idle, self.config.idle_reap_after,
+                )
+            return reaped
+
     async def stop_all(self) -> None:
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            self._reaper_task = None
         async with self._lock:
             for session in self._sessions.values():
                 await session.stop()
