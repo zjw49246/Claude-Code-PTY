@@ -1,5 +1,17 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-07-05 轮换退出处理器孤儿化 dispatcher proxy（CCM task #19/#23 卡死 2 小时）
+
+**现象**: CCM 生产上两个 chat task「一直不回复」：消息只入队不消费，队列深度持续增长；DB 里 turn 其实已完成并有回复。`asyncio pstree` 取证：队列消费者全部挂在 `_wait_process → _PTYProcessProxy.wait → Event.wait`，等一个永远不会 set 的 Event，直到 7200s task 超时。task #19 连续两轮各卡满 2 小时。
+
+**根因**: turn 中途命中限速横幅 → `on_exit` 轮换分支。`_try_chat_pool_rotation` 内部**同步 relaunch**，已把新 proxy/session/consumer 注册进同一个 `instance_id` 键位；随后的 `_proxies.pop + complete(ec)` 命中**新** proxy，dispatcher 手里的**旧** proxy 无人 complete。同时 `_sessions/_consumers.pop` 抹掉的是**重试 turn**的注册 → 重试 turn 游离，它退出时又按槽位键弹掉/complete 当时的任意占用者（连环误伤）。本质：**槽位键字典在 relaunch 后已换主，退出清理却按键盲操作**。
+
+**修复**: `commit b0edaf4`。全部改按对象身份操作：① proxy 支持 `chain()`（first-wins `complete()`），轮换分支把旧 proxy 链到重试 proxy 上，重试结束时最终结果转发给 dispatcher（多次轮换自然级联；无 relaunch 则兜底 complete）；② `launch_for_ccm` 双向绑定 proxy↔session，`on_exit` 从 `_consume` 传入的 session 找到自己的 proxy，末尾清理只 pop 仍属于本 turn 的条目；③ `_force_kill(expected=...)` 超时清场只停自己启动的 session。
+
+**以后如何避免**: 键位复用的字典（instance slot → 对象）在任何「先 relaunch 再清理」的路径上都必须身份检查后再 pop——这与 CCM task #728（consumer 注册表）是同一族 bug；kill/清场类操作要绑定目标对象，不能按槽位现值。
+
+---
+
 ## 2026-06-18 三个 PTY 模式 bug 的分析与修复
 
 ### Bug 1: CC Auto Compact 导致上下文丢失（task 660 / ccm-zhoujunwei）
