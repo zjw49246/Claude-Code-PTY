@@ -61,17 +61,40 @@ def backend(monkeypatch):
     return CCMBackend(im)
 
 
+class _SAChain:
+    """Chainable stand-in for sqlalchemy statement builders."""
+
+    def __call__(self, *a, **k):
+        return self
+
+    def __getattr__(self, name):
+        return self
+
+
+class _Col:
+    """Column stand-in usable in filter expressions."""
+
+    def __eq__(self, other):
+        return True
+
+    def __hash__(self):
+        return 0
+
+    def in_(self, *a, **k):
+        return True
+
+
 def _install_host_stubs(monkeypatch):
     """Fake the host-app modules on_exit imports (sqlalchemy, backend.models)."""
     sa = types.ModuleType("sqlalchemy")
-    sa.update = lambda *a, **k: None
-    sa.select = lambda *a, **k: None
+    sa.update = _SAChain()
+    sa.select = _SAChain()
     b = types.ModuleType("backend")
     bm = types.ModuleType("backend.models")
     bmi = types.ModuleType("backend.models.instance")
-    bmi.Instance = type("Instance", (), {})
+    bmi.Instance = type("Instance", (), {"id": _Col()})
     bmt = types.ModuleType("backend.models.task")
-    bmt.Task = type("Task", (), {})
+    bmt.Task = type("Task", (), {"id": _Col(), "status": _Col()})
     for name, mod in {
         "sqlalchemy": sa,
         "backend": b,
@@ -286,3 +309,69 @@ class TestBasePassesSession:
         await b._consume("k", s, "hi", task_id=1)
         assert seen["session"] is s
         assert seen["task_id"] == 1
+
+
+class TestSubagentOnlyCallback:
+    """The between-turns callback receives PTYEvent objects, not dicts.
+
+    Session.on_autonomous_event delivers PTYEvent (see session.py); the
+    subagent-only callback installed by on_exit indexed it like a dict and
+    crashed with AttributeError on every idle-time autonomous event (CCM prod
+    2026-07-07, task #27), so background sub-agent completions were never
+    mirrored while the session sat between chat turns.
+    """
+
+    @pytest.fixture
+    def chat_exit_im(self, backend):
+        from contextlib import asynccontextmanager
+
+        calls = []
+
+        async def upsert(task_id, event_type, payload):
+            calls.append((task_id, event_type, payload))
+
+        class _FakeDB:
+            async def execute(self, *a, **k):
+                return SimpleNamespace(rowcount=0)
+
+            async def commit(self):
+                pass
+
+        @asynccontextmanager
+        async def db_factory():
+            yield _FakeDB()
+
+        async def broadcast(*a, **k):
+            pass
+
+        backend._im._upsert_native_sub_agent = upsert
+        backend._im.db_factory = db_factory
+        backend._im.broadcaster = SimpleNamespace(broadcast=broadcast)
+        return calls
+
+    async def test_callback_handles_ptyevent(self, backend, chat_exit_im, monkeypatch):
+        from claude_pty.events import PTYEvent
+
+        _install_host_stubs(monkeypatch)
+        session = SimpleNamespace(session_id="sid-idle", _ccm_proxy=None)
+
+        await backend.on_exit(9, 0, chat_initiated=True, task_id=77, session=session)
+
+        cb = session.on_autonomous_event
+        assert cb is not None
+
+        payload = {"id": "agent-1", "status": "completed"}
+        await cb(
+            PTYEvent(
+                event_type="subagent_completed", subagent=payload, autonomous=True
+            )
+        )
+        assert chat_exit_im == [(77, "subagent_completed", payload)]
+
+        # Non-subagent autonomous chatter is ignored, and must not raise.
+        await cb(
+            PTYEvent(
+                event_type="message", role="assistant", content="hi", autonomous=True
+            )
+        )
+        assert len(chat_exit_im) == 1

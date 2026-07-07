@@ -205,7 +205,11 @@ class CCMBackend(BasePTYBackend):
         # allowing background Agent completions to mark sub-agents as done.
         if chat_initiated:
             if session:
-                async def _subagent_only_callback(event_dict, **ctx):
+                async def _subagent_only_callback(event, **ctx):
+                    # on_autonomous_event delivers PTYEvent objects (see
+                    # Session.on_autonomous_event); convert like base.py's
+                    # launch-time callback before the dict-shaped access below.
+                    event_dict = event.to_dict()
                     if event_dict.get("subagent") and event_dict.get("event_type", "").startswith("subagent_"):
                         try:
                             await self._im._upsert_native_sub_agent(
