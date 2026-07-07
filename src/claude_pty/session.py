@@ -53,6 +53,12 @@ class Session:
         self._resume_existing = resume_existing
         self._pending_prompt: str | None = None
         self._rate_limited_turn = False
+        # When True, the next _deliver_prompt skips channel inject and goes
+        # straight to PTY stdin. Used after cold resume (service restart) to
+        # avoid the prompt being wrapped in <channel source="pty-bridge"> tags
+        # which Claude misinterprets as "No response requested." because the
+        # old JSONL already contains identical channel tags.
+        self._force_stdin_next = False
         # Native sub-agent tracking (Agent/Task/Monitor tools in the JSONL)
         self._tracker = SubagentTracker()
         # Serializes JSONL reads between send_prompt and the idle watcher
@@ -118,6 +124,11 @@ class Session:
             if (self._restart_count > 0 or (self._resume_existing and self._session_id))
             else None
         )
+
+        # Cold resume (service restart → first message): force stdin delivery
+        # to avoid channel tags that Claude confuses with old JSONL content.
+        if resume_id and self._resume_existing and self._restart_count == 0:
+            self._force_stdin_next = True
 
         self._process = PTYProcess(
             cwd=self._cwd,
@@ -240,6 +251,18 @@ class Session:
         the turn actually started via JSONL activity.
         """
         loop = asyncio.get_running_loop()
+
+        # Cold-resume stdin override: skip channel inject entirely so the
+        # prompt arrives without <channel source="pty-bridge"> tags.
+        if self._force_stdin_next:
+            self._force_stdin_next = False
+            logger.info(
+                "Session %s: cold-resume stdin override — delivering via "
+                "PTY stdin to avoid channel tag confusion (%d chars)",
+                self.session_id, len(text),
+            )
+            await loop.run_in_executor(None, self._process.send_prompt, text)
+            return "stdin"
 
         if self._bridge and self._channel_inject_port:
             for attempt in range(1, self._INJECT_ATTEMPTS + 1):
