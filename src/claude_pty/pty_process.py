@@ -358,6 +358,18 @@ class PTYProcess:
                     and now >= cooldown_until
                     and any(m in confirm_buf for m in _CONFIRM_MARKERS)
                 ):
+                    if "compact" in confirm_buf.lower():
+                        # Resuming an over-limit conversation: the dialog
+                        # asks to compact before continuing. Confirming is
+                        # required to proceed; the Session layer holds
+                        # prompt delivery until the /compact completion
+                        # record appears (stdin is swallowed while it runs).
+                        logger.warning(
+                            "drain[%s]: startup dialog mentions compaction "
+                            "— confirming; /compact will run before input "
+                            "is accepted",
+                            self.session_id[:8],
+                        )
                     logger.info(
                         "drain[%s]: startup dialog detected, sending \\r",
                         self.session_id[:8],

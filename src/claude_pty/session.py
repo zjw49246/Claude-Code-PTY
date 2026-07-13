@@ -59,6 +59,13 @@ class Session:
         # which Claude misinterprets as "No response requested." because the
         # old JSONL already contains identical channel tags.
         self._force_stdin_next = False
+        # True while CC runs a local /compact. Resuming a conversation that
+        # outgrew the context window auto-triggers one (its confirmation
+        # dialog is auto-accepted by the drain loop's startup handler), and
+        # while it runs the TUI drops stdin pastes and channel notifications
+        # on the floor — prompt delivery must hold until the completion
+        # record appears in the JSONL.
+        self._compact_in_flight = False
         # Native sub-agent tracking (Agent/Task/Monitor tools in the JSONL)
         self._tracker = SubagentTracker()
         # Serializes JSONL reads between send_prompt and the idle watcher
@@ -147,6 +154,7 @@ class Session:
         # timeout). Delivery happens in send_prompt via channel injection
         # (with retries) after startup_wait.
         self._pending_prompt = None
+        self._compact_in_flight = False  # state belongs to this process
 
         self._session_id = self._process.session_id
         self._tracker.set_jsonl_path(self._process.jsonl_path)
@@ -168,6 +176,11 @@ class Session:
                 )
                 if not msgs:
                     continue
+                # A resume of an over-limit conversation auto-runs /compact;
+                # its start record lands during settle, so track it here or
+                # send_prompt never learns a compact is in flight.
+                for m in msgs:
+                    self._track_compact_state(m)
                 has_turn_end = any(
                     m.get("type") == "system"
                     and m.get("subtype") == "turn_duration"
@@ -213,6 +226,46 @@ class Session:
     def _is_slash_command(self, text: str) -> bool:
         cmd = text.strip().split()[0] if text.strip() else ""
         return cmd in self._SLASH_COMMANDS or (cmd.startswith("/") and len(cmd) > 1)
+
+    @staticmethod
+    def _user_record_text(raw: dict) -> str:
+        """Flatten a user record's content to plain text for marker checks."""
+        message = raw.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        return ""
+
+    def _track_compact_state(self, raw: dict) -> None:
+        """Track CC's local /compact runs from their JSONL records.
+
+        A prompt delivered while /compact runs leaves zero trace in the
+        JSONL — the TUI input layer is torn down (observed in production:
+        cold-resume auto-confirmed the compact dialog, the user prompt
+        typed mid-compact was swallowed, the turn never started and the
+        task was misjudged completed). Delivery holds while this flag is
+        up; any of the completion records below brings it down.
+        """
+        if raw.get("isCompactSummary") or (
+            raw.get("type") == "system"
+            and raw.get("subtype") == "compact_boundary"
+        ):
+            self._compact_in_flight = False
+            return
+        if raw.get("type") != "user":
+            return
+        text = self._user_record_text(raw)
+        if "<command-name>/compact</command-name>" in text:
+            self._compact_in_flight = True
+        elif self._compact_in_flight and "<local-command-stdout>" in text:
+            # /compact's stdout record ("Compacted ...") marks completion.
+            self._compact_in_flight = False
 
     async def send_prompt(
         self,
@@ -315,6 +368,7 @@ class Session:
                 None, self._reader.read_new_messages
             )
         for raw in backlog:
+            self._track_compact_state(raw)
             for event in self._reader.normalize(raw, include_user_text=True):
                 event.orphan = True
                 yield event
@@ -324,6 +378,16 @@ class Session:
             logger.info("Session %s: prompt already sent during start, skipping re-send", self.session_id)
             self._pending_prompt = None
             delivery = "channel"
+        elif self._compact_in_flight:
+            # CC is mid-/compact: anything written now is dropped by the
+            # TUI. Hold delivery; the poll loop below delivers as soon as
+            # the completion record appears.
+            logger.warning(
+                "Session %s: /compact in flight — holding prompt delivery "
+                "until it completes",
+                self.session_id,
+            )
+            delivery = None
         else:
             self._pending_prompt = None
             delivery = await self._deliver_prompt(text)
@@ -340,13 +404,16 @@ class Session:
         # it queues the prompt and echoes it when the new turn begins.)
         turn_started = False
         last_subagent_check = 0.0
-        # Channel inject "success" is no proof CC consumed the notification
-        # (observed in production: inject 13ms after a resume spawn was
-        # silently dropped — message blackholed for 30 min). Confirm the turn
-        # started via JSONL activity; otherwise re-send once via stdin.
+        # Delivery is never trusted blindly. Channel inject "success" is no
+        # proof CC consumed the notification (observed: inject 13ms after a
+        # resume spawn was silently dropped — message blackholed for 30 min);
+        # stdin pastes are swallowed while CC is busy with a local command
+        # (observed: /compact triggered by the cold-resume startup dialog).
+        # Confirm the turn started via its JSONL prompt echo; otherwise
+        # re-send once via stdin.
         confirm_deadline = (
             time.monotonic() + self.config.inject_confirm_timeout
-            if delivery == "channel"
+            if delivery is not None
             else None
         )
 
@@ -394,6 +461,7 @@ class Session:
                         )
 
             for raw in messages:
+                self._track_compact_state(raw)
                 if (
                     raw.get("type") == "rate_limit_event"
                     or raw.get("error") == "rate_limit"
@@ -405,9 +473,16 @@ class Session:
                     if self._reader.is_prompt_echo(raw, text):
                         turn_started = True
                         confirm_deadline = None  # delivery confirmed
-                    elif raw.get("type") == "queue-operation":
-                        # CC queued our prompt behind an in-flight turn —
+                    elif (
+                        raw.get("type") == "queue-operation"
+                        and isinstance(raw.get("content"), str)
+                        and text in raw["content"]
+                    ):
+                        # CC queued OUR prompt behind an in-flight turn —
                         # delivered, just not started yet. Don't re-send.
+                        # Content must contain the prompt: unrelated queue
+                        # ops (sub-agent task-notifications, replayed
+                        # history) prove nothing about our delivery.
                         confirm_deadline = None
                 for event in self._reader.normalize(
                     raw, include_user_text=not turn_started
@@ -437,18 +512,44 @@ class Session:
                 break
 
             if (
+                not turn_started
+                and delivery is None
+                and not self._compact_in_flight
+            ):
+                # /compact finished — CC accepts input again. Deliver the
+                # held prompt now (whatever reached the TUI mid-compact is
+                # gone for good).
+                logger.info(
+                    "Session %s: /compact completed, delivering held prompt",
+                    self.session_id,
+                )
+                delivery = await self._deliver_prompt(text)
+                self._last_activity = time.monotonic()
+                confirm_deadline = (
+                    time.monotonic() + self.config.inject_confirm_timeout
+                )
+
+            if (
                 confirm_deadline is not None
                 and time.monotonic() > confirm_deadline
             ):
-                confirm_deadline = None  # fall back at most once
-                logger.warning(
-                    "Session %s: no JSONL activity %.0fs after channel "
-                    "inject, re-sending prompt via PTY stdin",
-                    self.session_id, self.config.inject_confirm_timeout,
-                )
-                await loop.run_in_executor(
-                    None, self._process.send_prompt, text
-                )
+                if self._compact_in_flight:
+                    # A /compact started after delivery: a re-send now would
+                    # be dropped too. Re-arm and retry once it completes.
+                    confirm_deadline = (
+                        time.monotonic() + self.config.inject_confirm_timeout
+                    )
+                else:
+                    confirm_deadline = None  # fall back at most once
+                    logger.warning(
+                        "Session %s: turn not started %.0fs after %s "
+                        "delivery, re-sending prompt via PTY stdin",
+                        self.session_id, self.config.inject_confirm_timeout,
+                        delivery,
+                    )
+                    await loop.run_in_executor(
+                        None, self._process.send_prompt, text
+                    )
 
             # Structured JSONL signal — always trusted: end the turn so the
             # host can rotate accounts instead of waiting out the timeout.
@@ -543,6 +644,10 @@ class Session:
                 self._last_activity = time.monotonic()
                 cb = self.on_autonomous_event
                 for raw in messages:
+                    # A /compact can run between turns (autonomous turn
+                    # overflowing the window) — the next send_prompt must
+                    # know to hold delivery.
+                    self._track_compact_state(raw)
                     for event in self._reader.normalize(
                         raw, include_user_text=True
                     ):
