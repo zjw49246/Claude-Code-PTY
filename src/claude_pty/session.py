@@ -260,10 +260,16 @@ class Session:
             return
         if raw.get("type") != "user":
             return
-        text = self._user_record_text(raw)
-        if "<command-name>/compact</command-name>" in text:
+        # Real command records BEGIN with the tag — the CLI writes the
+        # command tags and nothing else. Match the prefix only: a user
+        # message merely quoting the marker mid-body (pasting a bug report
+        # about /compact) must not raise the flag, because nothing except a
+        # real compact record ever lowers it — a false positive here wedges
+        # prompt delivery for the rest of the session.
+        text = self._user_record_text(raw).lstrip()
+        if text.startswith("<command-name>/compact</command-name>"):
             self._compact_in_flight = True
-        elif self._compact_in_flight and "<local-command-stdout>" in text:
+        elif self._compact_in_flight and text.startswith("<local-command-stdout>"):
             # /compact's stdout record ("Compacted ...") marks completion.
             self._compact_in_flight = False
 

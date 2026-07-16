@@ -1070,3 +1070,19 @@ class TestCompactSwallowGuard:
             {"type": "text",
              "text": "<command-name>/compact</command-name>"}]}})
         assert s._compact_in_flight is True
+
+        # 正文里引用标记 ≠ 真命令记录（真记录以标记开头、别无其他）。
+        # 误升旗后除真 compact 外没有任何东西降旗，整个 session 的投递
+        # 都会被挂死——用户往聊天里贴一段讨论 /compact 的 bug 报告就中招
+        s2 = Session(cwd="/w")
+        s2._track_compact_state({"type": "user", "message": {"content":
+            "bug report: the crash happens right after "
+            "<command-name>/compact</command-name> runs mid-session"}})
+        assert s2._compact_in_flight is False
+        # 反方向同理：飞行中引用完成标记不算完成信号
+        s2._track_compact_state(self.COMPACT_CMD)
+        s2._track_compact_state({"type": "user", "message": {"content":
+            "log excerpt: <local-command-stdout>Compacted</local-command-stdout>"}})
+        assert s2._compact_in_flight is True
+        s2._track_compact_state(self.COMPACT_DONE)
+        assert s2._compact_in_flight is False
