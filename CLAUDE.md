@@ -13,6 +13,7 @@
 - **启动对话框**：spawn 前预写 `.claude.json` trust 条目 + 顶层 `hasCompletedOnboarding/theme`（首次交互模式会弹 theme picker，-p 模式从不弹）（主）+ drain loop 通用 `Entertoconfirm` 自动应答（兜底，剥 ANSI + 折叠空白匹配）
 - **撞限检测**：JSONL 结构化 `rate_limit_event` 立即可信；PTY 横幅扫描**单独不可信**（标记会出现在 TUI 渲染的对话正文里——tool result 引用本仓库源码即误中）：turn 已有 JSONL 活动 → 判误报清 flag 继续；turn 零 JSONL 输出再静默 `rate_limit_confirm_quiet`（默认 15s）才确认；turn 正常完成时清残留 flag 防毒化下一 turn
 - **PTY 职责**：进程保活、Esc 中断、启动应答、输出活动信号（`_last_output`）
+- **启动事务边界**（`pool.py`）：`SessionPool.get_or_create` 在独立 task 中 shield `Session.start`；若调用方取消或 start 在 spawn 后报错，必须先等待 start 事务收敛、再 shield `Session.stop`，确认未发布进程清理完成后才释放 pool 锁并重抛，禁止留下 pool 外的 Claude 进程
 - **空闲回收**：池内会话常驻（热复用），除溢出 LRU 驱逐外，周期 reaper（`idle_reap_interval`，默认 5min 扫一次）自动 stop 空闲超 `idle_reap_after`（默认 2h，0 关闭）的会话——mid-prompt / 有 pending 子 agent 的不动，被收的下条消息 `--resume` 冷启动，上下文不丢
 
 历史教训见 PROGRESS.md，待办见 TODO.md。

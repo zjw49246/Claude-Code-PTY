@@ -28,6 +28,7 @@ JsonlReader ──→ PTYEvent 流（与 CCM StreamParser 对齐）
 - **输出**：轮询 session 对应的 JSONL transcript，normalize 成 `PTYEvent`。回合结束以 `system/turn_duration` 哨兵判定（交互模式每 turn 恰一条）；`isApiErrorMessage: true` 表示 turn 被 API 错误掐断，立即以错误事件收尾。
 - **注入隔离**：inject 端口由 OS 分配；注入负载带目标 session_id，不匹配回 409——防同机多宿主串话。
 - **启动免对话框**：spawn 前预写 `.claude.json` 的 trust 条目和 `hasCompletedOnboarding/theme`，drain loop 兜底自动应答 `Enter to confirm` 类提示。
+- **启动事务清理**：会话池在独立 task 中保护 `Session.start`。调用方在 spawn→pool 注册窗口取消，或 start 在 spawn 后报错时，pool 会先等待启动收敛并停止未发布 Session，再把原异常交还调用方，不会遗留无人跟踪的 Claude 进程。
 - **撞限检测**：JSONL 结构化 `rate_limit_event` 立即可信；PTY 屏幕横幅单独不可信（对话正文里出现限流字样会误中），需 turn 内零 JSONL 输出且再静默 `rate_limit_confirm_quiet`（默认 15s）才确认。
 
 ## 安装
@@ -105,7 +106,8 @@ session = await pool.get_or_create(cwd="/path/to/project")
 
 ```bash
 uv run pytest          # 全量
-uv run pytest tests/test_session.py -k inject   # 局部
+uv run pytest tests/test_pool.py                 # 会话池/启动事务
+uv run pytest tests/test_inject_isolation.py     # 注入隔离
 ```
 
 设计文档在 `docs/`（`pty-solution.md`、`pty-interactive-mode.md` 等），历史经验教训见 `PROGRESS.md`。

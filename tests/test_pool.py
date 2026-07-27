@@ -5,7 +5,10 @@ These tests mock Session to avoid spawning real CC processes.
 
 import asyncio
 import time
+from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from claude_pty.config import PTYConfig
 from claude_pty.pool import SessionPool
@@ -97,3 +100,79 @@ class TestSessionPool:
         pool._sessions = {"abc": s}
         assert await pool.get("abc") is s
         assert await pool.get("nope") is None
+
+    async def test_failed_start_stops_unpublished_session(self):
+        pool = SessionPool(config=PTYConfig(idle_reap_after=0))
+        session = _make_mock_session()
+        session.start = AsyncMock(
+            side_effect=RuntimeError("failed after process spawn"),
+        )
+
+        with (
+            patch("claude_pty.pool.Session", return_value=session),
+            pytest.raises(RuntimeError, match="failed after process spawn"),
+        ):
+            await pool.get_or_create("failed", "/work")
+
+        session.stop.assert_awaited_once()
+        assert "failed" not in pool._sessions
+        assert "failed" not in pool._access_order
+
+    async def test_cancelled_start_settles_then_stops_unpublished_session(self):
+        pool = SessionPool(config=PTYConfig(idle_reap_after=0))
+        started = asyncio.Event()
+        allow_start_to_settle = asyncio.Event()
+        stop_started = asyncio.Event()
+        allow_stop_to_finish = asyncio.Event()
+
+        class SpawnedSession:
+            def __init__(self):
+                self.process_alive = False
+
+            async def start(self, initial_prompt=None):
+                self.process_alive = True
+                started.set()
+                await allow_start_to_settle.wait()
+
+            async def stop(self):
+                stop_started.set()
+                await allow_stop_to_finish.wait()
+                self.process_alive = False
+
+        session = SpawnedSession()
+        with patch("claude_pty.pool.Session", return_value=session):
+            request = asyncio.create_task(
+                pool.get_or_create("cancelled", "/work"),
+            )
+            try:
+                await started.wait()
+                request.cancel()
+                await asyncio.sleep(0)
+
+                # The caller's cancellation must not cancel Session.start in
+                # the spawn-to-publication window.
+                assert not request.done()
+                assert session.process_alive
+
+                allow_start_to_settle.set()
+                await stop_started.wait()
+
+                # A repeated cancellation must not interrupt process cleanup.
+                request.cancel()
+                await asyncio.sleep(0)
+                assert not request.done()
+
+                allow_stop_to_finish.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+            finally:
+                allow_start_to_settle.set()
+                allow_stop_to_finish.set()
+                if not request.done():
+                    request.cancel()
+                with suppress(asyncio.CancelledError):
+                    await request
+
+        assert not session.process_alive
+        assert "cancelled" not in pool._sessions
+        assert "cancelled" not in pool._access_order

@@ -13,6 +13,46 @@ from .exceptions import PoolExhaustedError
 logger = logging.getLogger(__name__)
 
 
+async def _stop_unpublished_session(
+    session: Session,
+    start_task: asyncio.Task,
+) -> None:
+    """Let a cancellation-unsafe start settle, then stop its process.
+
+    ``Session.start`` spawns through ``run_in_executor``. Cancelling the
+    coroutine does not stop that executor thread, so calling ``session.stop``
+    immediately can race with a process that has not finished spawning yet.
+    Keep start alive in its own task, wait for it to settle, and only then
+    tear down the unpublished Session.
+    """
+
+    try:
+        await start_task
+    except BaseException:
+        # The original start error is re-raised by get_or_create. This await is
+        # only here to settle the transaction and retrieve its exception.
+        pass
+    try:
+        await session.stop()
+    except BaseException:
+        # Cleanup failure must not hide the original start/cancellation cause.
+        logger.exception("Failed to stop unpublished PTY session")
+
+
+async def _await_cleanup_shielded(cleanup_task: asyncio.Task) -> None:
+    """Wait for cleanup despite repeated cancellation of the caller."""
+
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            # The cleanup task remains alive. Defer every cancellation until
+            # the spawned process has been stopped, then the caller re-raises
+            # its original BaseException.
+            continue
+    cleanup_task.result()
+
+
 class SessionPool:
     """Manages multiple concurrent Sessions with LRU eviction."""
 
@@ -101,7 +141,21 @@ class SessionPool:
                 channel_inject_port=inject_port,
                 resume_existing=resume,
             )
-            await session.start(initial_prompt=initial_prompt)
+            # Session.start has a spawn-to-publication window. Run it in an
+            # independent task so cancellation of get_or_create cannot cancel
+            # the executor-backed spawn and leave a live, untracked process.
+            start_task = asyncio.create_task(
+                session.start(initial_prompt=initial_prompt)
+            )
+            try:
+                await asyncio.shield(start_task)
+            except BaseException:
+                cleanup_task = asyncio.create_task(
+                    _stop_unpublished_session(session, start_task)
+                )
+                await _await_cleanup_shielded(cleanup_task)
+                self._access_order.pop(session_id, None)
+                raise
             self._sessions[session_id] = session
             return session
 
