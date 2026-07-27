@@ -1,5 +1,14 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-07-27 Session.start 失败/取消遗留未跟踪 Claude 进程
+
+- **现象**：`SessionPool.get_or_create` 在 `Session.start` 已 spawn、尚未写入 `_sessions` 时被取消或遇到后续启动异常，调用方收到终态，但 Claude 子进程仍存活且不属于 pool，宿主无法再 STOP/回收它。
+- **根因**：pool 直接 `await session.start()`；取消会穿透到 executor-backed spawn coroutine，但不会停止底层线程，异常路径也没有局部 Session 的 owner cleanup。
+- **解决**（commit `8d49995`）：start 放入独立 task 并由 pool shield；异常/取消时先等待启动事务收敛，再在独立 cleanup task 中 stop 未发布 Session。重复取消只延后交付，不能打断清理；清理完成后才释放 pool 锁、移除 access-order 并重抛原始原因。
+- **教训**：资源的 spawn→registry publish 必须是一个有 owner 的事务；`run_in_executor` future 被取消不等于线程或其创建的进程停止。取消安全需要同时 shield“启动收敛”和“失败补偿”，只 shield stop 仍会与尚未完成的 spawn 竞态。
+
+---
+
 ## 2026-07-05 轮换退出处理器孤儿化 dispatcher proxy（CCM task #19/#23 卡死 2 小时）
 
 **现象**: CCM 生产上两个 chat task「一直不回复」：消息只入队不消费，队列深度持续增长；DB 里 turn 其实已完成并有回复。`asyncio pstree` 取证：队列消费者全部挂在 `_wait_process → _PTYProcessProxy.wait → Event.wait`，等一个永远不会 set 的 Event，直到 7200s task 超时。task #19 连续两轮各卡满 2 小时。
