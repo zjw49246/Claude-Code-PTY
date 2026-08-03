@@ -824,3 +824,265 @@ class TestInjectDeliveryConfirm:
             pass
 
         assert stdin_calls == []  # turn 已启动，不应 stdin 重投
+
+
+class TestCompactSwallowGuard:
+    """cold-resume 撞上 /compact：对话超窗时 --resume 弹压缩确认框，drain
+    的启动自动确认替用户按下 Enter → CC 开始 /compact；此时投递的 prompt
+    被 TUI 整个吞掉（JSONL 零痕迹）。生产实录（2026-07-13）：用户消息消失、
+    turn 永不开始、任务被误判 completed。
+
+    修复三件套：
+    - stdin 投递也要 JSONL 回显确认，超时重投（原先只确认 channel）；
+    - /compact 进行中挂起投递/重投，完成记录一到立即补投；
+    - queue-operation 只有内容包含本 prompt 才算投递证据。
+    """
+
+    COMPACT_CMD = {
+        "type": "user",
+        "message": {"content": (
+            "<command-name>/compact</command-name>\n"
+            "<command-message>compact</command-message>"
+        )},
+    }
+    COMPACT_DONE = {
+        "type": "user",
+        "message": {"content": (
+            "<local-command-stdout>Compacted (ctrl+o to see full summary)"
+            "</local-command-stdout>"
+        )},
+    }
+
+    def _make_session(self, reader, proc):
+        from claude_pty.session import Session
+
+        session = Session(cwd="/w", session_id=proc.session_id,
+                          config=PTYConfig(response_timeout=10,
+                                           post_response_wait=0,
+                                           jsonl_poll_interval=0.01,
+                                           inject_confirm_timeout=0.05))
+        session._process = proc
+        session._reader = reader
+        session._started = True
+        return session
+
+    @staticmethod
+    def _make_proc(stdin_calls, on_send=None):
+        class FakeProc:
+            session_id = "sid-cg"
+            is_alive = True
+            exit_code = None
+            rate_limited = False
+
+            def send_prompt(self, text):
+                stdin_calls.append(text)
+                if on_send is not None:
+                    on_send()
+
+        return FakeProc()
+
+    @staticmethod
+    def _reader_helpers():
+        class _Base:
+            def normalize(self, raw, include_user_text=False):
+                return []
+
+            def is_prompt_echo(self, raw, prompt):
+                c = (raw.get("message") or {}).get("content")
+                return (raw.get("type") == "user"
+                        and isinstance(c, str) and prompt in c
+                        and "<command-name>" not in c)
+
+            def is_response_complete(self, raw):
+                return raw.get("subtype") == "turn_duration"
+
+        return _Base
+
+    async def test_stdin_delivery_confirmed_and_resent(self):
+        """stdin 投递被吞（无回显）→ 确认超时后重投一次。"""
+        stdin_calls = []
+        Base = self._reader_helpers()
+
+        class FakeReader(Base):
+            def read_new_messages(self):
+                if len(stdin_calls) >= 2:  # 第二次投递才真正到达
+                    return [{"type": "user", "message": {"content": "hi"}},
+                            {"type": "system", "subtype": "turn_duration"}]
+                return []
+
+        session = self._make_session(FakeReader(), self._make_proc(stdin_calls))
+        events = []
+        async for ev in session.send_prompt("hi"):
+            events.append(ev)
+
+        assert stdin_calls == ["hi", "hi"]
+        assert not any("timed out" in (ev.content or "") for ev in events)
+
+    async def test_delivery_held_while_compact_in_flight(self):
+        """backlog 里已有 /compact 起始记录 → 投递挂起，完成记录一到才投。"""
+        stdin_calls = []
+        Base = self._reader_helpers()
+        cls = TestCompactSwallowGuard
+
+        class FakeReader(Base):
+            step = 0
+
+            def read_new_messages(self):
+                FakeReader.step += 1
+                if FakeReader.step == 1:  # 投递前 backlog：compact 已开跑
+                    return [cls.COMPACT_CMD]
+                if FakeReader.step in (2, 3):  # compact 进行中
+                    return []
+                if FakeReader.step == 4:  # compact 完成
+                    return [cls.COMPACT_DONE]
+                if stdin_calls:  # 补投之后：回显 + 完成
+                    return [{"type": "user", "message": {"content": "hi"}},
+                            {"type": "system", "subtype": "turn_duration"}]
+                return []
+
+        sent_at_step = []
+        proc = self._make_proc(
+            stdin_calls, on_send=lambda: sent_at_step.append(FakeReader.step)
+        )
+        session = self._make_session(FakeReader(), proc)
+        events = []
+        async for ev in session.send_prompt("hi"):
+            events.append(ev)
+
+        assert stdin_calls == ["hi"]  # 恰好一次，没有对着压缩中的 TUI 白投
+        assert sent_at_step[0] >= 4   # 且在完成记录之后
+        assert not any("timed out" in (ev.content or "") for ev in events)
+
+    async def test_resend_deferred_when_compact_starts_after_delivery(self):
+        """投递后 compact 才开跑（首投已被吞）→ 确认超时不对压缩中的 TUI
+        重投，等完成记录后再补投。"""
+        stdin_calls = []
+        Base = self._reader_helpers()
+        cls = TestCompactSwallowGuard
+
+        class FakeReader(Base):
+            step = 0
+
+            def read_new_messages(self):
+                FakeReader.step += 1
+                if FakeReader.step == 1:
+                    return []  # 投递前 backlog：干净
+                if FakeReader.step == 2:
+                    return [cls.COMPACT_CMD]  # 投递后 compact 开跑
+                if FakeReader.step == 20:
+                    return [{"type": "system", "subtype": "compact_boundary"}]
+                if len(stdin_calls) >= 2:
+                    return [{"type": "user", "message": {"content": "hi"}},
+                            {"type": "system", "subtype": "turn_duration"}]
+                return []
+
+        sent_at_step = []
+        proc = self._make_proc(
+            stdin_calls, on_send=lambda: sent_at_step.append(FakeReader.step)
+        )
+        session = self._make_session(FakeReader(), proc)
+        events = []
+        async for ev in session.send_prompt("hi"):
+            events.append(ev)
+
+        assert stdin_calls == ["hi", "hi"]  # 首投 + compact 完成后的补投
+        assert sent_at_step[1] >= 20        # 补投不得早于 boundary 被读到
+        assert not any("timed out" in (ev.content or "") for ev in events)
+
+    async def test_unrelated_queue_op_is_no_delivery_proof(self):
+        """无关 queue-op（子 agent task-notification、重放历史）不能吸收
+        投递确认——原实现见任意 queue-operation 即清确认，投递丢失后
+        永不重投。"""
+        stdin_calls = []
+        Base = self._reader_helpers()
+
+        class FakeReader(Base):
+            step = 0
+
+            def read_new_messages(self):
+                FakeReader.step += 1
+                if FakeReader.step == 2:
+                    return [{"type": "queue-operation", "operation": "enqueue",
+                             "content": "<task-notification>other</task-notification>"}]
+                if len(stdin_calls) >= 2:
+                    return [{"type": "user", "message": {"content": "hi"}},
+                            {"type": "system", "subtype": "turn_duration"}]
+                return []
+
+        session = self._make_session(FakeReader(), self._make_proc(stdin_calls))
+        async for _ in session.send_prompt("hi"):
+            pass
+
+        assert stdin_calls == ["hi", "hi"]  # 无关 queue-op 后仍然重投了
+
+    async def test_matching_queue_op_confirms_delivery(self):
+        """内容包含本 prompt 的 enqueue = 已投递（排队等在前一 turn 后面），
+        不得重投。"""
+        stdin_calls = []
+        Base = self._reader_helpers()
+
+        class FakeReader(Base):
+            step = 0
+
+            def read_new_messages(self):
+                FakeReader.step += 1
+                if FakeReader.step == 2:
+                    return [{"type": "queue-operation", "operation": "enqueue",
+                             "content": '<channel source="pty-bridge">\nhi\n</channel>'}]
+                if FakeReader.step == 12:  # 排队的 prompt 终于开跑
+                    return [{"type": "user", "message": {"content": "hi"}},
+                            {"type": "system", "subtype": "turn_duration"}]
+                return []
+
+        session = self._make_session(FakeReader(), self._make_proc(stdin_calls))
+        async for _ in session.send_prompt("hi"):
+            pass
+
+        assert stdin_calls == ["hi"]  # 确认被吸收，没有重投
+
+    def test_track_compact_state_transitions(self):
+        from claude_pty.session import Session
+
+        s = Session(cwd="/w")
+        assert s._compact_in_flight is False
+        # 其他命令的 stdout 不误触发
+        s._track_compact_state({"type": "user", "message": {"content":
+            "<local-command-stdout>ok</local-command-stdout>"}})
+        assert s._compact_in_flight is False
+        s._track_compact_state(self.COMPACT_CMD)
+        assert s._compact_in_flight is True
+        # 无关 user 记录不影响在飞状态
+        s._track_compact_state({"type": "user", "message": {"content": "hello"}})
+        assert s._compact_in_flight is True
+        s._track_compact_state(self.COMPACT_DONE)
+        assert s._compact_in_flight is False
+        # compact_boundary 也是完成信号
+        s._track_compact_state(self.COMPACT_CMD)
+        s._track_compact_state({"type": "system", "subtype": "compact_boundary"})
+        assert s._compact_in_flight is False
+        # isCompactSummary 也是完成信号
+        s._track_compact_state(self.COMPACT_CMD)
+        s._track_compact_state({"isCompactSummary": True, "type": "user",
+                                "message": {"content": "summary"}})
+        assert s._compact_in_flight is False
+        # list 形态 content 的命令记录同样识别
+        s._track_compact_state({"type": "user", "message": {"content": [
+            {"type": "text",
+             "text": "<command-name>/compact</command-name>"}]}})
+        assert s._compact_in_flight is True
+
+        # 正文里引用标记 ≠ 真命令记录（真记录以标记开头、别无其他）。
+        # 误升旗后除真 compact 外没有任何东西降旗，整个 session 的投递
+        # 都会被挂死——用户往聊天里贴一段讨论 /compact 的 bug 报告就中招
+        s2 = Session(cwd="/w")
+        s2._track_compact_state({"type": "user", "message": {"content":
+            "bug report: the crash happens right after "
+            "<command-name>/compact</command-name> runs mid-session"}})
+        assert s2._compact_in_flight is False
+        # 反方向同理：飞行中引用完成标记不算完成信号
+        s2._track_compact_state(self.COMPACT_CMD)
+        s2._track_compact_state({"type": "user", "message": {"content":
+            "log excerpt: <local-command-stdout>Compacted</local-command-stdout>"}})
+        assert s2._compact_in_flight is True
+        s2._track_compact_state(self.COMPACT_DONE)
+        assert s2._compact_in_flight is False
