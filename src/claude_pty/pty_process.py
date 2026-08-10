@@ -83,6 +83,11 @@ class PTYProcess:
         self.pid: int | None = None
 
         self._drain_thread: threading.Thread | None = None
+        # Every write to the PTY master, and the close which invalidates that
+        # descriptor, belongs to one serialization domain.  A prompt is two
+        # writes (bracketed paste, then Enter) with a short delay between them;
+        # without this lock a live-turn steer or interrupt can split that pair.
+        self._input_lock = threading.Lock()
         self._last_output: float = 0.0  # monotonic ts of last PTY output
         self.rate_limited: bool = False  # set by drain loop on limit banner
         self._running = False
@@ -108,6 +113,17 @@ class PTYProcess:
         (marker text rendered from conversation content, not a real banner).
         The drain loop resumes scanning with a fresh buffer."""
         self.rate_limited = False
+
+    @staticmethod
+    def _write_all(fd: int, payload: bytes) -> None:
+        """Write one complete PTY frame; ``os.write`` may be partial."""
+
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("PTY write made no progress")
+            remaining = remaining[written:]
 
     # Per-cwd lock: serialize .mcp.json write + CC spawn to prevent
     # race conditions when multiple sessions share the same project dir.
@@ -362,7 +378,9 @@ class PTYProcess:
                         "drain[%s]: startup dialog detected, sending \\r",
                         self.session_id[:8],
                     )
-                    os.write(self.master_fd, b"\r")
+                    with self._input_lock:
+                        if self._running and self.master_fd is not None:
+                            self._write_all(self.master_fd, b"\r")
                     confirm_buf = ""
                     cooldown_until = now + _CONFIRM_COOLDOWN
             except OSError:
@@ -383,21 +401,28 @@ class PTYProcess:
         early, and arbitrarily long prompts arrive instantly. (The old
         char-by-char human-typing simulation was both slow and unsafe.)
         """
-        if not self.is_alive:
-            raise PTYDeadError(f"Process {self.session_id} is not alive")
+        with self._input_lock:
+            if (
+                not self._running
+                or not self.is_alive
+                or self.master_fd is None
+            ):
+                raise PTYDeadError(f"Process {self.session_id} is not alive")
 
-        logger.info(
-            "send_prompt[%s]: %d chars, master_fd=%s",
-            self.session_id[:8], len(text), self.master_fd,
-        )
-        payload = b"\x1b[200~" + text.encode("utf-8") + b"\x1b[201~"
-        os.write(self.master_fd, payload)
-        time.sleep(0.15)  # let Ink process the paste before submitting
-        os.write(self.master_fd, b"\r")
+            master_fd = self.master_fd
+            logger.info(
+                "send_prompt[%s]: %d chars, master_fd=%s",
+                self.session_id[:8], len(text), master_fd,
+            )
+            payload = b"\x1b[200~" + text.encode("utf-8") + b"\x1b[201~"
+            self._write_all(master_fd, payload)
+            time.sleep(0.15)  # let Ink process the paste before submitting
+            self._write_all(master_fd, b"\r")
 
     def send_interrupt(self) -> None:
-        if self.master_fd is not None:
-            os.write(self.master_fd, b"\x1b")
+        with self._input_lock:
+            if self._running and self.master_fd is not None:
+                self._write_all(self.master_fd, b"\x1b")
 
     @property
     def is_alive(self) -> bool:
@@ -422,25 +447,30 @@ class PTYProcess:
     def stop(self, timeout: float = 5.0) -> int | None:
         self._running = False
 
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                if self.proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-            else:
-                self.proc.kill()
-                self.proc.wait()
+        # Wait for an already-admitted prompt/steer to submit its Enter before
+        # terminating the child or closing the descriptor.  Closing happens
+        # before joining the drain thread so a select/read blocked on this PTY
+        # wakes instead of waiting for a lock held by stop().
+        with self._input_lock:
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    if self.proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                else:
+                    self.proc.kill()
+                    self.proc.wait()
+
+            if self.master_fd is not None:
+                try:
+                    os.close(self.master_fd)
+                except OSError:
+                    pass
+                self.master_fd = None
 
         if self._drain_thread and self._drain_thread.is_alive():
             self._drain_thread.join(timeout=2)
-
-        if self.master_fd is not None:
-            try:
-                os.close(self.master_fd)
-            except OSError:
-                pass
-            self.master_fd = None
 
         return self.proc.returncode if self.proc else None

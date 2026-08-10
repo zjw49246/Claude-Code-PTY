@@ -38,6 +38,13 @@ def _turn_duration():
     return {"type": "system", "subtype": "turn_duration", "durationMs": 1}
 
 
+def _queue_operation(operation, content=None):
+    event = {"type": "queue-operation", "operation": operation}
+    if content is not None:
+        event["content"] = content
+    return event
+
+
 def _agent_tool_use(tool_use_id="toolu_1", name="Agent", **input_extra):
     inp = {"subagent_type": "Explore", "description": "查架构", **input_extra}
     return {
@@ -263,15 +270,18 @@ def _make_session(tmp_path, config=None) -> Session:
         jsonl_path = str(jsonl)
         rate_limited = False
         sent: list = []
+        stop_count = 0
 
         def send_prompt(self, text):
             FakeProc.sent.append(text)
 
         def stop(self):
+            FakeProc.stop_count += 1
             FakeProc.is_alive = False
 
     FakeProc.sent = []
     FakeProc.is_alive = True
+    FakeProc.stop_count = 0
     session._process = FakeProc()
     session._tracker.set_jsonl_path(str(jsonl))
     session._reader = JsonlReader(str(jsonl), tracker=session._tracker)
@@ -389,7 +399,397 @@ class TestTurnAlignment:
         assert [e.content for e in replies] == ["普通回答"]
 
 
+class TestLiveSteering:
+    async def _wait_until(self, predicate, timeout=1.0):
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not predicate():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("condition was not reached")
+            await asyncio.sleep(0.005)
+
+    async def test_steers_only_after_prompt_echo_without_channels(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+
+        # Delivery to stdin alone is not enough: until CC echoes this exact
+        # prompt, it may still be queued behind another foreground turn.
+        assert session.active_turn_process is None
+        assert await session.steer_active_turn("too early") is False
+
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+        native_process = session.active_turn_process
+
+        steering = asyncio.create_task(session.steer_active_turn(
+            "change direction", expected_process=native_process
+        ))
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "change direction"]
+        )
+        _append(
+            session,
+            _queue_operation("enqueue", "change direction"),
+            _queue_operation("remove"),
+        )
+        assert await steering is True
+
+        _append(session, _assistant_text("done"), _turn_duration())
+        await turn
+        assert session.active_turn_process is None
+
+    async def test_terminal_race_keeps_dequeued_followup_managed(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        steering = asyncio.create_task(
+            session.steer_active_turn("boundary update")
+        )
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "boundary update"]
+        )
+        # This is the production race signature: the original terminal lands
+        # after preflight but before CC records the stdin prompt.  Dequeue then
+        # starts a new turn; the original consumer must stay attached to it.
+        _append(
+            session,
+            _assistant_text("original done"),
+            _turn_duration(),
+            _queue_operation("enqueue", "boundary update"),
+            _queue_operation("dequeue"),
+            _user_text("boundary update"),
+            _assistant_text("followup done"),
+            _turn_duration(),
+        )
+
+        assert await steering is True
+        events = await turn
+        contents = [event.content for event in events if event.content]
+        assert "original done" in contents
+        assert "followup done" in contents
+        assert session.active_turn_process is None
+
+    async def test_old_same_content_enqueue_cannot_ack_new_write(
+        self, tmp_path
+    ):
+        config = PTYConfig(
+            jsonl_poll_interval=0.2,
+            post_response_wait=0.0,
+            response_timeout=5.0,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+            inject_confirm_timeout=1.0,
+        )
+        session = _make_session(tmp_path, config=config)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(
+            lambda: session.active_turn_process is not None,
+            timeout=2.0,
+        )
+
+        # This durable record predates the new PTY write and has identical
+        # text. Preflight must preserve it for the consumer without treating
+        # it as acknowledgement of this injection.
+        _append(session, _queue_operation("enqueue", "repeatable update"))
+        steering = asyncio.create_task(
+            session.steer_active_turn("repeatable update")
+        )
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "repeatable update"]
+        )
+        assert session._pending_steer is not None
+        assert session._pending_steer.prewrite_message_ids
+        await asyncio.sleep(0.05)
+        assert not steering.done()
+
+        _append(
+            session,
+            _queue_operation("enqueue", "repeatable update"),
+            _queue_operation("remove"),
+        )
+        assert await steering is True
+        _append(session, _assistant_text("done"), _turn_duration())
+        await turn
+
+    async def test_enqueue_ack_does_not_release_routing_fence(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        steering = asyncio.create_task(
+            session.steer_active_turn("accepted update")
+        )
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "accepted update"]
+        )
+        _append(session, _queue_operation("enqueue", "accepted update"))
+        assert await steering is True
+
+        # API acknowledgement is intentionally earlier than queue routing.
+        # The foreground consumer must retain ownership until remove/dequeue.
+        assert session._pending_steer is not None
+        assert session._pending_steer.enqueued is True
+        assert session._unsettled_steer_process is session._process
+        _append(session, _assistant_text("still working"))
+        await asyncio.sleep(0.03)
+        assert session._pending_steer is not None
+
+        _append(
+            session,
+            _queue_operation("remove"),
+            _assistant_text("done"),
+            _turn_duration(),
+        )
+        await turn
+        assert session._pending_steer is None
+        assert session._unsettled_steer_process is None
+
+    async def test_unacknowledged_write_stops_exact_process_before_failure(
+        self, tmp_path
+    ):
+        config = PTYConfig(
+            jsonl_poll_interval=0.01,
+            post_response_wait=0.0,
+            response_timeout=1.0,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+            inject_confirm_timeout=0.05,
+        )
+        session = _make_session(tmp_path, config=config)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        assert await session.steer_active_turn("never acknowledged") is False
+        assert session._process.is_alive is False
+        assert session._process.stop_count == 1
+        assert session._pending_steer is None
+        assert session._unsettled_steer_process is None
+        events = await turn
+        assert any(event.event_type == EventType.SESSION_CRASHED for event in events)
+
+    async def test_api_error_reaps_process_before_unacked_steer_fails(
+        self, tmp_path
+    ):
+        config = PTYConfig(
+            jsonl_poll_interval=0.01,
+            post_response_wait=0.0,
+            response_timeout=1.0,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+            inject_confirm_timeout=0.5,
+        )
+        session = _make_session(tmp_path, config=config)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        steering = asyncio.create_task(
+            session.steer_active_turn("queued before API failure")
+        )
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "queued before API failure"]
+        )
+        _append(
+            session,
+            {
+                "type": "assistant",
+                "isApiErrorMessage": True,
+                "message": {"role": "assistant", "content": []},
+            },
+        )
+
+        assert await steering is False
+        # A False result is not observable until exact-process reap completed.
+        assert session._process.stop_count == 1
+        assert session._process.is_alive is False
+        await turn
+
+    async def test_exact_enqueue_ack_survives_later_api_error_in_batch(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        steering = asyncio.create_task(
+            session.steer_active_turn("accepted before API failure")
+        )
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "accepted before API failure"]
+        )
+        _append(
+            session,
+            _queue_operation("enqueue", "accepted before API failure"),
+            _queue_operation("remove"),
+            {
+                "type": "assistant",
+                "isApiErrorMessage": True,
+                "message": {"role": "assistant", "content": []},
+            },
+        )
+
+        assert await steering is True
+        assert session._pending_steer is None
+        assert session._unsettled_steer_process is None
+        assert session._process.stop_count == 0
+        await turn
+
+    async def test_dequeued_followup_timeout_stops_exact_process(
+        self, tmp_path
+    ):
+        config = PTYConfig(
+            jsonl_poll_interval=0.01,
+            post_response_wait=0.0,
+            response_timeout=0.08,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+            inject_confirm_timeout=0.5,
+        )
+        session = _make_session(tmp_path, config=config)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        steering = asyncio.create_task(
+            session.steer_active_turn("follow-up without echo")
+        )
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "follow-up without echo"]
+        )
+        _append(
+            session,
+            _assistant_text("original done"),
+            _turn_duration(),
+            _queue_operation("enqueue", "follow-up without echo"),
+            _queue_operation("dequeue"),
+        )
+        assert await steering is True
+
+        events = await turn
+        assert session._process.is_alive is False
+        assert session._process.stop_count == 1
+        assert any(
+            event.event_type == EventType.SYSTEM_EVENT and event.is_error
+            for event in events
+        )
+
+    async def test_unread_terminal_is_rejected_and_preserved_for_consumer(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        # Persist terminal output without giving the poller another cycle.
+        # steer_active_turn must preflight that unread JSONL and hand it back
+        # to the original consumer instead of starting an orphan turn.
+        _append(session, _assistant_text("done"), _turn_duration())
+        assert await session.steer_active_turn("must not run") is False
+        assert session._process.sent == ["initial task"]
+
+        events = await turn
+        assert any((event.content or "") == "done" for event in events)
+        assert session.active_turn_process is None
+
+    async def test_rejects_unsafe_or_replaced_steering_input(self, tmp_path):
+        session = _make_session(tmp_path)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        assert await session.steer_active_turn("/exit") is False
+        assert await session.steer_active_turn("bad\x1b[201~payload") is False
+        assert await session.steer_active_turn(
+            "stale process", expected_process=object()
+        ) is False
+        assert session._process.sent == ["initial task"]
+
+        _append(session, _assistant_text("done"), _turn_duration())
+        await turn
+
+    @staticmethod
+    async def _collect(stream):
+        return [event async for event in stream]
+
+
 class TestIdleWatcher:
+    async def test_idle_watcher_drains_prefetched_handoff(self, tmp_path):
+        session = _make_session(tmp_path)
+        received: list = []
+
+        async def capture(event):
+            received.append(event)
+
+        session.on_autonomous_event = capture
+        session._prefetched_messages.append(
+            _assistant_text("preserved after foreground exit")
+        )
+
+        watcher = asyncio.create_task(session._idle_watcher())
+        try:
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while not received:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("prefetched event was not handed off")
+                await asyncio.sleep(0.01)
+        finally:
+            watcher.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await watcher
+
+        assert session._prefetched_messages == []
+        assert received[0].content == "preserved after foreground exit"
+        assert received[0].autonomous is True
+
     async def test_autonomous_turn_streamed_between_prompts(self, tmp_path):
         session = _make_session(tmp_path)
         received: list = []
