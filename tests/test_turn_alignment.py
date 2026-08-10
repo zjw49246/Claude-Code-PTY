@@ -45,6 +45,16 @@ def _queue_operation(operation, content=None):
     return event
 
 
+def _rate_limit_event(status, *, hard_limit=False):
+    return {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": status,
+            "hard_limit": hard_limit,
+        },
+    }
+
+
 def _agent_tool_use(tool_use_id="toolu_1", name="Agent", **input_extra):
     inp = {"subagent_type": "Explore", "description": "查架构", **input_extra}
     return {
@@ -407,6 +417,20 @@ class TestLiveSteering:
                 raise AssertionError("condition was not reached")
             await asyncio.sleep(0.005)
 
+    def test_structured_rate_limit_distinguishes_soft_status(self):
+        assert Session._structured_rate_limit_is_hard(
+            _rate_limit_event("allowed_warning")
+        ) is False
+        assert Session._structured_rate_limit_is_hard(
+            _rate_limit_event("allowed")
+        ) is False
+        assert Session._structured_rate_limit_is_hard(
+            _rate_limit_event("rejected")
+        ) is True
+        assert Session._structured_rate_limit_is_hard({
+            "type": "rate_limit_event",
+        }) is True
+
     async def test_steers_only_after_prompt_echo_without_channels(
         self, tmp_path
     ):
@@ -671,6 +695,37 @@ class TestLiveSteering:
         assert session._pending_steer is None
         assert session._unsettled_steer_process is None
         assert session._process.stop_count == 0
+        await turn
+
+    async def test_allowed_warning_does_not_override_enqueue_ack(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        steering = asyncio.create_task(
+            session.steer_active_turn("accepted near quota")
+        )
+        await self._wait_until(
+            lambda: session._process.sent
+            == ["initial task", "accepted near quota"]
+        )
+        _append(
+            session,
+            _queue_operation("enqueue", "accepted near quota"),
+            _queue_operation("remove"),
+            _rate_limit_event("allowed_warning"),
+        )
+
+        assert await steering is True
+        assert session._process.is_alive is True
+        assert session._rate_limited_turn is False
+        _append(session, _assistant_text("done"), _turn_duration())
         await turn
 
     async def test_dequeued_followup_timeout_stops_exact_process(
