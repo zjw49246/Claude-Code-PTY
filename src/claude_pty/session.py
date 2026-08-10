@@ -815,20 +815,31 @@ class Session:
                             self._active_turn_process = None
                             self._active_turn_owner = None
 
-                if (
+                if api_error_in_batch or rate_limit_in_batch:
+                    # A provider error later in this same durable batch wins
+                    # over enqueue: CC accepted bytes but did not establish a
+                    # usable model turn. If cross-turn routing is still live,
+                    # reattach the receipt so deactivation stops the exact
+                    # process before waking the API with False.
+                    failed_pending = (
+                        self._pending_steer or enqueued_pending_in_batch
+                    )
+                    if (
+                        failed_pending is not None
+                        and not failed_pending.acknowledged.done()
+                    ):
+                        if self._unsettled_steer_process is not None:
+                            self._pending_steer = failed_pending
+                        else:
+                            failed_pending.acknowledged.set_result(False)
+                    self._active_turn_process = None
+                elif (
                     enqueued_pending_in_batch is not None
                     and not enqueued_pending_in_batch.acknowledged.done()
                 ):
-                    # Exact enqueue(content) is CC's durable acceptance ACK.
-                    # Queue acceptance is independent from an API/rate result
-                    # elsewhere in the same JSONL batch.
+                    # Exact enqueue(content), with no provider failure in the
+                    # same batch, is CC's durable acceptance acknowledgement.
                     enqueued_pending_in_batch.acknowledged.set_result(True)
-
-                if api_error_in_batch or rate_limit_in_batch:
-                    # The turn is about to fail closed below. Keep any
-                    # unacknowledged token attached so deactivation can reap
-                    # its exact process *before* waking the API with False.
-                    self._active_turn_process = None
 
             if messages:
                 turn_had_messages = True
