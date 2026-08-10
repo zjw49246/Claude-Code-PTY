@@ -18,6 +18,17 @@ from .exceptions import SessionError
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass
+class _PendingSteer:
+    """One stdin update awaiting CC's queue-operation acknowledgement."""
+
+    content: str
+    process: PTYProcess
+    acknowledged: asyncio.Future[bool]
+    enqueued: bool = False
+    prewrite_message_ids: set[int] = dataclasses.field(default_factory=set)
+
+
 class Session:
     """High-level session combining PTYProcess + JsonlReader.
 
@@ -46,6 +57,27 @@ class Session:
         self._cwd = cwd
         self._session_id = session_id
         self._send_lock = asyncio.Lock()
+        # ``send_prompt`` owns JSONL consumption for a whole foreground turn,
+        # while live steering must run concurrently with that consumer.  Keep
+        # a separate, short-held state lock and expose only the exact native
+        # process whose prompt delivery has been confirmed.
+        self._turn_state_lock = asyncio.Lock()
+        self._active_turn_owner: object | None = None
+        self._active_turn_process: PTYProcess | None = None
+        self._pending_steer: _PendingSteer | None = None
+        # A queued stdin steer may cross the original turn boundary. Keep the
+        # exact process fenced until JSONL proves that the update was absorbed
+        # or that its dequeued follow-up reached a terminal record.
+        self._unsettled_steer_process: PTYProcess | None = None
+        # Only one write may await queue acknowledgement at a time.  The
+        # process-level lock prevents byte interleaving; this lock also keeps
+        # queue-operation records attributable without synthetic prompt text.
+        self._steer_admission_lock = asyncio.Lock()
+        # ``steer_active_turn`` may need to inspect unread JSONL while proving
+        # that a terminal sentinel is not already durable.  It must not steal
+        # those records from the foreground consumer, so inspected batches are
+        # handed back through this buffer under ``_reader_lock``.
+        self._prefetched_messages: list[dict] = []
         self._bridge = bridge
         self._channel_inject_port = channel_inject_port
         # True when session_id refers to an existing CC session on disk:
@@ -89,6 +121,26 @@ class Session:
         return self._process.jsonl_path if self._process else None
 
     @property
+    def active_turn_process(self) -> PTYProcess | None:
+        """Opaque identity of the exact foreground process that can be steered.
+
+        Callers may capture this object under their own lifecycle lock and pass
+        it back to :meth:`steer_active_turn` as ``expected_process``.  The
+        method revalidates identity while holding the Session state lock, so
+        this property is only a snapshot and never grants authority by itself.
+        """
+
+        process = self._active_turn_process
+        if (
+            process is None
+            or process is not self._process
+            or not self._send_lock.locked()
+            or not process.is_alive
+        ):
+            return None
+        return process
+
+    @property
     def has_pending_subagents(self) -> bool:
         """True while model-spawned sub-agents (Agent/Monitor) are pending.
 
@@ -118,6 +170,11 @@ class Session:
 
     async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
+
+        # A new JsonlReader belongs to a new native-process epoch. Do not
+        # replay object identities prefetched from the previous reader.
+        async with self._turn_state_lock:
+            self._prefetched_messages.clear()
 
         resume_id = (
             self._session_id
@@ -229,8 +286,298 @@ class Session:
             )
             return
         async with self._send_lock:
-            async for event in self._send_prompt_inner(text, timeout):
-                yield event
+            turn_owner = object()
+            async with self._turn_state_lock:
+                self._active_turn_owner = turn_owner
+                self._active_turn_process = None
+            try:
+                async for event in self._send_prompt_inner(
+                    text, timeout, turn_owner
+                ):
+                    yield event
+            finally:
+                await self._deactivate_active_turn(turn_owner)
+
+    async def _activate_active_turn(
+        self,
+        turn_owner: object,
+        process: PTYProcess,
+    ) -> None:
+        """Publish steerability only for this send_prompt/process epoch."""
+
+        async with self._turn_state_lock:
+            if (
+                self._active_turn_owner is turn_owner
+                and self._process is process
+                and process.is_alive
+            ):
+                self._active_turn_process = process
+
+    async def _deactivate_active_turn(self, turn_owner: object) -> None:
+        stop_process: PTYProcess | None = None
+        resolve_after_stop: _PendingSteer | None = None
+        async with self._turn_state_lock:
+            if self._active_turn_owner is turn_owner:
+                self._active_turn_process = None
+                self._active_turn_owner = None
+                pending, self._pending_steer = self._pending_steer, None
+                stop_process = self._unsettled_steer_process
+                self._unsettled_steer_process = None
+                if (
+                    pending is not None
+                    and not pending.acknowledged.done()
+                ):
+                    if stop_process is not None:
+                        resolve_after_stop = pending
+                    else:
+                        pending.acknowledged.set_result(False)
+
+        try:
+            if stop_process is not None and stop_process.is_alive:
+                logger.warning(
+                    "Session %s: stopping exact process after an unsettled "
+                    "stdin steer lost its foreground consumer",
+                    self.session_id,
+                )
+                await self._settle_blocking_input(stop_process.stop)
+        finally:
+            if (
+                resolve_after_stop is not None
+                and not resolve_after_stop.acknowledged.done()
+            ):
+                resolve_after_stop.acknowledged.set_result(False)
+
+    async def _fail_closed_steer(
+        self,
+        pending: _PendingSteer,
+        *,
+        reason: str,
+        only_if_unacknowledged: bool = False,
+    ) -> bool:
+        """Revoke one ambiguous stdin write and stop its exact process."""
+
+        process = pending.process
+        async with self._turn_state_lock:
+            if only_if_unacknowledged and (
+                pending.acknowledged.done()
+                or self._pending_steer is not pending
+            ):
+                return False
+            if self._pending_steer is pending:
+                self._pending_steer = None
+            if self._unsettled_steer_process is process:
+                self._unsettled_steer_process = None
+            if self._active_turn_process is process:
+                self._active_turn_process = None
+                self._active_turn_owner = None
+            if not pending.acknowledged.done():
+                pending.acknowledged.set_result(False)
+
+        if process.is_alive:
+            logger.warning(
+                "Session %s: stopping exact process after %s",
+                self.session_id,
+                reason,
+            )
+            await self._settle_blocking_input(process.stop)
+        return True
+
+    async def _read_with_prefetch_locked(self) -> list[dict]:
+        """Read one JSONL batch while state and reader locks are held."""
+
+        messages, self._prefetched_messages = (
+            self._prefetched_messages,
+            [],
+        )
+        if self._reader is not None:
+            messages.extend(
+                await asyncio.to_thread(self._reader.read_new_messages)
+            )
+        return messages
+
+    @staticmethod
+    async def _settle_blocking_input(call, *args) -> None:
+        """Do not release input ownership while a cancelled thread still writes."""
+
+        work = asyncio.create_task(asyncio.to_thread(call, *args))
+        delayed_cancel: asyncio.CancelledError | None = None
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError as exc:
+                if delayed_cancel is None:
+                    delayed_cancel = exc
+        work.result()
+        if delayed_cancel is not None:
+            raise delayed_cancel
+
+    async def steer_active_turn(
+        self,
+        content: str,
+        *,
+        expected_process: PTYProcess | None = None,
+    ) -> bool:
+        """Submit stdin steering to the exact active foreground turn.
+
+        Unlike :meth:`inject`, this does not use Channels.  It succeeds only
+        after the owning prompt has been observed in CC's JSONL and before its
+        terminal boundary.  ``expected_process`` is an optional ABA fence for
+        hosts that reuse one Session id across native process restarts.
+
+        ``True`` proves both the complete bracketed-paste + Enter write and
+        CC's matching queue-operation acknowledgement.  If the write races
+        the original turn's terminal boundary, the same foreground consumer
+        follows the dequeued prompt through its next terminal sentinel.
+        """
+
+        if (
+            not content
+            or self._is_slash_command(content)
+            or "\x00" in content
+            or "\x1b" in content
+        ):
+            return False
+        operation = asyncio.create_task(
+            self._steer_active_turn_inner(content, expected_process)
+        )
+        delayed_cancel: asyncio.CancelledError | None = None
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError as exc:
+                if delayed_cancel is None:
+                    delayed_cancel = exc
+        result = operation.result()
+        if delayed_cancel is not None:
+            raise delayed_cancel
+        return result
+
+    async def _steer_active_turn_inner(
+        self,
+        content: str,
+        expected_process: PTYProcess | None,
+    ) -> bool:
+        async with self._steer_admission_lock:
+            loop = asyncio.get_running_loop()
+            pending: _PendingSteer | None = None
+            async with self._turn_state_lock:
+                process = self._active_turn_process
+                if (
+                    process is None
+                    or self._active_turn_owner is None
+                    or self._pending_steer is not None
+                    or self._unsettled_steer_process is not None
+                    or not self._send_lock.locked()
+                    or process is not self._process
+                    or not process.is_alive
+                    or (
+                        expected_process is not None
+                        and process is not expected_process
+                    )
+                ):
+                    return False
+                pending = _PendingSteer(
+                    content=content,
+                    process=process,
+                    acknowledged=loop.create_future(),
+                )
+                # Register before reading or writing.  A foreground consumer
+                # that already read turn_duration must now defer its exit;
+                # otherwise this stdin write could create an orphan next turn.
+                self._pending_steer = pending
+
+                if self._reader is None:
+                    self._pending_steer = None
+                    return False
+                try:
+                    async with self._reader_lock:
+                        unread = await asyncio.to_thread(
+                            self._reader.read_new_messages
+                        )
+                        if unread:
+                            self._prefetched_messages.extend(unread)
+                except Exception:
+                    self._pending_steer = None
+                    logger.exception(
+                        "Session %s: active-turn JSONL preflight failed",
+                        self.session_id,
+                    )
+                    return False
+
+                if any(
+                    self._reader.is_response_complete(raw)
+                    or raw.get("isApiErrorMessage")
+                    or raw.get("type") == "rate_limit_event"
+                    or raw.get("error") == "rate_limit"
+                    for raw in unread
+                ):
+                    self._pending_steer = None
+                    self._active_turn_process = None
+                    self._active_turn_owner = None
+                    return False
+
+                pending.prewrite_message_ids.update(map(id, unread))
+
+                try:
+                    # Once a PTY write starts, any ambiguous exit must reap
+                    # this exact process before reporting failure. Otherwise
+                    # a client retry could execute both the old and new text.
+                    self._unsettled_steer_process = process
+                    await self._settle_blocking_input(
+                        process.send_prompt, content
+                    )
+                except BaseException as exc:
+                    write_error: BaseException | None = exc
+                else:
+                    write_error = None
+                    self._last_activity = time.monotonic()
+
+            if write_error is not None:
+                logger.error(
+                    "Session %s: active-turn stdin steering failed",
+                    self.session_id,
+                    exc_info=(
+                        type(write_error),
+                        write_error,
+                        write_error.__traceback__,
+                    ),
+                )
+                await self._fail_closed_steer(
+                    pending,
+                    reason="an incomplete active-turn stdin write",
+                )
+                if isinstance(write_error, asyncio.CancelledError):
+                    raise write_error
+                return False
+
+            try:
+                return bool(
+                    await asyncio.wait_for(
+                        asyncio.shield(pending.acknowledged),
+                        timeout=self.config.inject_confirm_timeout,
+                    )
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Session %s: stdin steering was not acknowledged within %.1fs",
+                    self.session_id,
+                    self.config.inject_confirm_timeout,
+                )
+                # Returning False while the write remains live would permit a
+                # retry to execute twice. Re-check once at the deadline edge,
+                # then stop the exact process before reporting failure.
+                revoked = await self._fail_closed_steer(
+                    pending,
+                    reason="an unacknowledged active-turn stdin write",
+                    only_if_unacknowledged=True,
+                )
+                if revoked:
+                    return False
+                return (
+                    bool(pending.acknowledged.result())
+                    if pending.acknowledged.done()
+                    else False
+                )
 
     # Channel server boots with CC's MCP startup; retry injection briefly
     # before falling back to PTY stdin.
@@ -294,12 +641,15 @@ class Session:
         self,
         text: str,
         timeout: float | None,
+        turn_owner: object,
     ) -> AsyncIterator[PTYEvent]:
         if not self._started or not self._process:
             raise SessionError("Session not started. Call start() first.")
 
         if not self._process.is_alive:
             await self._auto_resume(text)
+
+        turn_process = self._process
 
         timeout = timeout or self.config.response_timeout
         loop = asyncio.get_running_loop()
@@ -310,10 +660,9 @@ class Session:
         # reply, and crucially without counting its stale turn_duration as our
         # completion sentinel (the task-87 off-by-one). With the idle watcher
         # running this is normally empty — it is the last line of defense.
-        async with self._reader_lock:
-            backlog = await loop.run_in_executor(
-                None, self._reader.read_new_messages
-            )
+        async with self._turn_state_lock:
+            async with self._reader_lock:
+                backlog = await self._read_with_prefetch_locked()
         for raw in backlog:
             for event in self._reader.normalize(raw, include_user_text=True):
                 event.orphan = True
@@ -339,6 +688,9 @@ class Session:
         # not complete this one. (If CC was mid-turn when the prompt arrived,
         # it queues the prompt and echoes it when the new turn begins.)
         turn_started = False
+        steer_followup_prompt: str | None = None
+        steer_followup_started = False
+        terminal_deferred = False
         last_subagent_check = 0.0
         # Channel inject "success" is no proof CC consumed the notification
         # (observed in production: inject 13ms after a resume spawn was
@@ -351,19 +703,133 @@ class Session:
         )
 
         while not response_complete and time.monotonic() < deadline:
-            if not self._process.is_alive:
+            if self._process is not turn_process or not turn_process.is_alive:
+                await self._deactivate_active_turn(turn_owner)
                 yield PTYEvent(
                     event_type=EventType.SESSION_CRASHED,
-                    content=f"Process died (exit_code={self._process.exit_code})",
+                    content=(
+                        "Process was replaced during the foreground turn"
+                        if self._process is not turn_process
+                        else f"Process died (exit_code={turn_process.exit_code})"
+                    ),
                     is_error=True,
                     session_id=self.session_id,
                 )
                 break
 
-            async with self._reader_lock:
-                messages = await loop.run_in_executor(
-                    None, self._reader.read_new_messages
-                )
+            async with self._turn_state_lock:
+                async with self._reader_lock:
+                    messages = await self._read_with_prefetch_locked()
+
+                # Inspect the complete batch before yielding any event.  A pending
+                # stdin steer owns the terminal edge: enqueue+remove means CC
+                # absorbed it into this turn; enqueue+dequeue means it became a
+                # next turn which this same consumer must continue to collect.
+                scan_started = turn_started
+                batch_response_complete = False
+                api_error_in_batch = False
+                rate_limit_in_batch = False
+                enqueued_pending_in_batch: _PendingSteer | None = None
+                for raw in messages:
+                    if (
+                        not scan_started
+                        and self._reader.is_prompt_echo(raw, text)
+                    ):
+                        scan_started = True
+
+                    pending = self._pending_steer
+                    if pending is not None:
+                        operation = (
+                            raw.get("operation")
+                            if raw.get("type") == "queue-operation"
+                            else None
+                        )
+                        if (
+                            operation == "enqueue"
+                            and raw.get("content") == pending.content
+                            and id(raw) not in pending.prewrite_message_ids
+                        ):
+                            pending.enqueued = True
+                            enqueued_pending_in_batch = pending
+                        elif (
+                            pending.enqueued
+                            and operation in {"remove", "dequeue"}
+                        ):
+                            if operation == "dequeue" or terminal_deferred:
+                                steer_followup_prompt = pending.content
+                                steer_followup_started = False
+                                self._active_turn_process = None
+                            elif (
+                                self._unsettled_steer_process
+                                is pending.process
+                            ):
+                                # The update was folded into the current turn;
+                                # no cross-turn routing remains to guard.
+                                self._unsettled_steer_process = None
+                            self._pending_steer = None
+
+                    if (
+                        steer_followup_prompt is not None
+                        and not steer_followup_started
+                        and self._reader.is_prompt_echo(
+                            raw, steer_followup_prompt
+                        )
+                    ):
+                        steer_followup_started = True
+                        terminal_deferred = False
+                        if (
+                            self._active_turn_owner is turn_owner
+                            and self._process is turn_process
+                            and turn_process.is_alive
+                        ):
+                            self._active_turn_process = turn_process
+
+                    if raw.get("isApiErrorMessage"):
+                        api_error_in_batch = True
+                    if (
+                        raw.get("type") == "rate_limit_event"
+                        or raw.get("error") == "rate_limit"
+                    ):
+                        rate_limit_in_batch = True
+
+                    if (
+                        scan_started
+                        and self._reader.is_response_complete(raw)
+                    ):
+                        if self._pending_steer is not None:
+                            terminal_deferred = True
+                            self._active_turn_process = None
+                        elif (
+                            steer_followup_prompt is not None
+                            and not steer_followup_started
+                        ):
+                            terminal_deferred = True
+                            self._active_turn_process = None
+                        else:
+                            batch_response_complete = True
+                            if (
+                                self._unsettled_steer_process
+                                is turn_process
+                            ):
+                                self._unsettled_steer_process = None
+                            self._active_turn_process = None
+                            self._active_turn_owner = None
+
+                if (
+                    enqueued_pending_in_batch is not None
+                    and not enqueued_pending_in_batch.acknowledged.done()
+                ):
+                    # Exact enqueue(content) is CC's durable acceptance ACK.
+                    # Queue acceptance is independent from an API/rate result
+                    # elsewhere in the same JSONL batch.
+                    enqueued_pending_in_batch.acknowledged.set_result(True)
+
+                if api_error_in_batch or rate_limit_in_batch:
+                    # The turn is about to fail closed below. Keep any
+                    # unacknowledged token attached so deactivation can reap
+                    # its exact process *before* waking the API with False.
+                    self._active_turn_process = None
+
             if messages:
                 turn_had_messages = True
                 self._last_activity = time.monotonic()
@@ -405,6 +871,15 @@ class Session:
                     if self._reader.is_prompt_echo(raw, text):
                         turn_started = True
                         confirm_deadline = None  # delivery confirmed
+                        if not (
+                            batch_response_complete
+                            or api_error_in_batch
+                            or rate_limit_in_batch
+                            or terminal_deferred
+                        ):
+                            await self._activate_active_turn(
+                                turn_owner, turn_process
+                            )
                     elif raw.get("type") == "queue-operation":
                         # CC queued our prompt behind an in-flight turn —
                         # delivered, just not started yet. Don't re-send.
@@ -417,14 +892,27 @@ class Session:
                         event.orphan = True
                     yield event
 
-                if turn_started and self._reader.is_response_complete(raw):
-                    response_complete = True
-                    break
+            if batch_response_complete:
+                response_complete = True
+
+            # A timed-out/failed steer can clear the pending receipt after the
+            # original terminal was already consumed.  Finish that exact turn
+            # once no managed follow-up remains; never leave the poller hung.
+            if terminal_deferred and steer_followup_prompt is None:
+                async with self._turn_state_lock:
+                    if (
+                        self._pending_steer is None
+                        and self._unsettled_steer_process is None
+                    ):
+                        response_complete = True
+                        self._active_turn_process = None
+                        self._active_turn_owner = None
 
             # An API error aborts the turn server-side: CC writes the error
             # message but never a turn_duration sentinel. End the turn as an
             # error instead of hanging until response_timeout.
             if not response_complete and api_error_turn:
+                await self._deactivate_active_turn(turn_owner)
                 yield PTYEvent(
                     event_type=EventType.SYSTEM_EVENT,
                     content=(
@@ -447,12 +935,13 @@ class Session:
                     self.session_id, self.config.inject_confirm_timeout,
                 )
                 await loop.run_in_executor(
-                    None, self._process.send_prompt, text
+                    None, turn_process.send_prompt, text
                 )
 
             # Structured JSONL signal — always trusted: end the turn so the
             # host can rotate accounts instead of waiting out the timeout.
             if not response_complete and self._rate_limited_turn:
+                await self._deactivate_active_turn(turn_owner)
                 yield self._rate_limit_event()
                 break
 
@@ -479,6 +968,7 @@ class Session:
                     time.monotonic() - self._last_activity
                     >= self.config.rate_limit_confirm_quiet
                 ):
+                    await self._deactivate_active_turn(turn_owner)
                     yield self._rate_limit_event()
                     break
 
@@ -501,6 +991,7 @@ class Session:
             self._process.clear_rate_limited()
 
         if not response_complete and time.monotonic() >= deadline:
+            await self._deactivate_active_turn(turn_owner)
             yield PTYEvent(
                 event_type=EventType.SYSTEM_EVENT,
                 content=f"Response timed out after {timeout}s",
@@ -520,7 +1011,6 @@ class Session:
         (task-87 off-by-one). Events are forwarded to on_autonomous_event
         flagged autonomous=True; reads also keep idle_seconds honest.
         """
-        loop = asyncio.get_running_loop()
         while True:
             try:
                 await asyncio.sleep(self.config.idle_poll_interval)
@@ -530,12 +1020,11 @@ class Session:
                     or self._send_lock.locked()  # send_prompt owns the reader
                 ):
                     continue
-                async with self._reader_lock:
-                    if self._send_lock.locked():
-                        continue
-                    messages = await loop.run_in_executor(
-                        None, self._reader.read_new_messages
-                    )
+                async with self._turn_state_lock:
+                    async with self._reader_lock:
+                        if self._send_lock.locked():
+                            continue
+                        messages = await self._read_with_prefetch_locked()
                 if not messages:
                     if self._tracker.transcripts_grew():
                         self._last_activity = time.monotonic()
@@ -565,9 +1054,14 @@ class Session:
                 )
 
     async def send_interrupt(self) -> None:
-        if self._process:
+        async with self._turn_state_lock:
+            turn_owner = self._active_turn_owner
+        if turn_owner is not None:
+            await self._deactivate_active_turn(turn_owner)
+        process = self._process
+        if process and process.is_alive:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._process.send_interrupt)
+            await loop.run_in_executor(None, process.send_interrupt)
 
     def on_permission_request(
         self, handler: Callable[[str, dict], None]
@@ -685,8 +1179,20 @@ class Session:
             self._idle_watcher_task = None
         if self._bridge and self.session_id:
             self._bridge.unregister_session(self.session_id)
-        if self._process:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._process.stop)
-        self._started = False
+        async with self._turn_state_lock:
+            self._active_turn_process = None
+            self._active_turn_owner = None
+            pending, self._pending_steer = self._pending_steer, None
+            self._unsettled_steer_process = None
+            self._prefetched_messages.clear()
+        process = self._process
+        try:
+            if process:
+                await self._settle_blocking_input(process.stop)
+        finally:
+            # Never report an injection failure until its exact process has
+            # been reaped (or the stop attempt itself has failed visibly).
+            if pending is not None and not pending.acknowledged.done():
+                pending.acknowledged.set_result(False)
+            self._started = False
         logger.info("Session %s stopped", self.session_id)

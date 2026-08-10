@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import threading
 
 from claude_pty.config import PTYConfig
 from claude_pty.pty_process import PTYProcess
@@ -82,6 +83,76 @@ class TestChannelsEnabled:
     def test_disabled_by_default(self):
         proc = PTYProcess(cwd="/p")
         assert proc.channels_enabled is False
+
+
+class TestInputSerialization:
+    def test_write_all_handles_partial_pty_writes(self, monkeypatch):
+        chunks: list[bytes] = []
+
+        def partial_write(_fd, payload):
+            chunk = bytes(payload[:2])
+            chunks.append(chunk)
+            return len(chunk)
+
+        monkeypatch.setattr(
+            "claude_pty.pty_process.os.write", partial_write
+        )
+
+        PTYProcess._write_all(10, b"abcdef")
+
+        assert b"".join(chunks) == b"abcdef"
+
+    def test_concurrent_prompts_cannot_split_paste_and_enter(
+        self, monkeypatch
+    ):
+        proc = PTYProcess(cwd="/p", session_id="serialized")
+
+        class FakeChild:
+            @staticmethod
+            def poll():
+                return None
+
+        proc.proc = FakeChild()
+        proc.master_fd = 10
+        proc._running = True
+        writes: list[bytes] = []
+        first_sleep = threading.Event()
+        release_first = threading.Event()
+
+        def record_write(_fd, payload):
+            writes.append(bytes(payload))
+            return len(payload)
+
+        monkeypatch.setattr(
+            "claude_pty.pty_process.os.write", record_write
+        )
+
+        def controlled_sleep(_seconds):
+            if not first_sleep.is_set():
+                first_sleep.set()
+                assert release_first.wait(timeout=1)
+
+        monkeypatch.setattr(
+            "claude_pty.pty_process.time.sleep", controlled_sleep
+        )
+
+        first = threading.Thread(target=proc.send_prompt, args=("first",))
+        second = threading.Thread(target=proc.send_prompt, args=("second",))
+        first.start()
+        assert first_sleep.wait(timeout=1)
+        second.start()
+        release_first.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert writes == [
+            b"\x1b[200~first\x1b[201~",
+            b"\r",
+            b"\x1b[200~second\x1b[201~",
+            b"\r",
+        ]
 
 
 class TestSetupMcpConfig:
