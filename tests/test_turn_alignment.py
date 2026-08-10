@@ -624,6 +624,7 @@ class TestLiveSteering:
         )
         _append(
             session,
+            _queue_operation("enqueue", "queued before API failure"),
             {
                 "type": "assistant",
                 "isApiErrorMessage": True,
@@ -637,7 +638,7 @@ class TestLiveSteering:
         assert session._process.is_alive is False
         await turn
 
-    async def test_exact_enqueue_ack_survives_later_api_error_in_batch(
+    async def test_api_error_later_in_batch_overrides_enqueue_ack(
         self, tmp_path
     ):
         session = _make_session(tmp_path)
@@ -666,7 +667,7 @@ class TestLiveSteering:
             },
         )
 
-        assert await steering is True
+        assert await steering is False
         assert session._pending_steer is None
         assert session._unsettled_steer_process is None
         assert session._process.stop_count == 0
