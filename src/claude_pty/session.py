@@ -168,6 +168,22 @@ class Session:
             session_id=self.session_id,
         )
 
+    @staticmethod
+    def _structured_rate_limit_is_hard(raw: dict) -> bool:
+        """Return whether one structured quota record aborts the turn."""
+
+        if raw.get("error") == "rate_limit":
+            return True
+        if raw.get("type") != "rate_limit_event":
+            return False
+        info = raw.get("rate_limit_info")
+        if not isinstance(info, dict):
+            return True
+        if bool(info.get("hard_limit")):
+            return True
+        status = str(info.get("status") or "").lower()
+        return status not in {"allowed", "allowed_warning"}
+
     async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
 
@@ -507,8 +523,7 @@ class Session:
                 if any(
                     self._reader.is_response_complete(raw)
                     or raw.get("isApiErrorMessage")
-                    or raw.get("type") == "rate_limit_event"
-                    or raw.get("error") == "rate_limit"
+                    or self._structured_rate_limit_is_hard(raw)
                     for raw in unread
                 ):
                     self._pending_steer = None
@@ -786,10 +801,7 @@ class Session:
 
                     if raw.get("isApiErrorMessage"):
                         api_error_in_batch = True
-                    if (
-                        raw.get("type") == "rate_limit_event"
-                        or raw.get("error") == "rate_limit"
-                    ):
+                    if self._structured_rate_limit_is_hard(raw):
                         rate_limit_in_batch = True
 
                     if (
@@ -871,10 +883,7 @@ class Session:
                         )
 
             for raw in messages:
-                if (
-                    raw.get("type") == "rate_limit_event"
-                    or raw.get("error") == "rate_limit"
-                ):
+                if self._structured_rate_limit_is_hard(raw):
                     self._rate_limited_turn = True
                 if raw.get("isApiErrorMessage"):
                     api_error_turn = True
