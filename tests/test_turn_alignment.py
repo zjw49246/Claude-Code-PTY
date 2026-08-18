@@ -408,6 +408,116 @@ class TestTurnAlignment:
         replies = [e for e in events if e.event_type == EventType.MESSAGE]
         assert [e.content for e in replies] == ["普通回答"]
 
+    async def test_unrelated_queue_operation_does_not_cancel_channel_fallback(
+        self, tmp_path
+    ):
+        """Child queue records cannot suppress a dropped channel prompt."""
+
+        config = PTYConfig(
+            jsonl_poll_interval=0.01,
+            post_response_wait=0.0,
+            response_timeout=1.0,
+            inject_confirm_timeout=0.05,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+        )
+        session = _make_session(tmp_path, config)
+        channel_calls = []
+
+        async def channel_delivery(_text):
+            channel_calls.append(_text)
+            return "channel"
+
+        session._deliver_prompt = channel_delivery
+        prompt = "follow-up prompt"
+
+        async def cc_responds():
+            await asyncio.sleep(0.02)
+            _append(
+                session,
+                _queue_operation(
+                    "enqueue",
+                    "<task-notification>child finished</task-notification>",
+                ),
+                _queue_operation("dequeue"),
+                _user_text(
+                    "<task-notification>child finished</task-notification>"
+                ),
+                _assistant_text("child reply"),
+                _turn_duration(),
+            )
+            # The confirmation window must still trigger exactly one stdin
+            # retry despite the unrelated child records above.
+            deadline = asyncio.get_running_loop().time() + 0.5
+            while not session._process.sent and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.005)
+            assert session._process.sent == [prompt]
+            _append(
+                session,
+                _user_text(prompt),
+                _assistant_text("follow-up reply"),
+                _turn_duration(),
+            )
+
+        writer = asyncio.create_task(cc_responds())
+        events = [e async for e in session.send_prompt(prompt, timeout=1.0)]
+        await writer
+
+        assert channel_calls == [prompt]
+        assert session._process.sent == [prompt]
+        replies = [
+            e
+            for e in events
+            if not e.orphan
+            and e.event_type == EventType.MESSAGE
+            and e.role == "assistant"
+        ]
+        assert [e.content for e in replies] == ["follow-up reply"]
+
+    async def test_matching_queue_operation_confirms_channel_delivery(
+        self, tmp_path
+    ):
+        """An enqueue carrying this prompt still suppresses duplicate stdin."""
+
+        config = PTYConfig(
+            jsonl_poll_interval=0.01,
+            post_response_wait=0.0,
+            response_timeout=1.0,
+            inject_confirm_timeout=0.05,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+        )
+        session = _make_session(tmp_path, config)
+
+        async def channel_delivery(_text):
+            return "channel"
+
+        session._deliver_prompt = channel_delivery
+        prompt = "queued follow-up"
+
+        async def cc_responds():
+            await asyncio.sleep(0.02)
+            _append(
+                session,
+                _queue_operation("enqueue", prompt),
+                _queue_operation("dequeue"),
+                _user_text(prompt),
+                _assistant_text("queued reply"),
+                _turn_duration(),
+            )
+
+        writer = asyncio.create_task(cc_responds())
+        events = [e async for e in session.send_prompt(prompt, timeout=1.0)]
+        await writer
+
+        assert session._process.sent == []
+        replies = [
+            e
+            for e in events
+            if e.event_type == EventType.MESSAGE and e.role == "assistant"
+        ]
+        assert [e.content for e in replies] == ["queued reply"]
+
 
 class TestLiveSteering:
     async def _wait_until(self, predicate, timeout=1.0):

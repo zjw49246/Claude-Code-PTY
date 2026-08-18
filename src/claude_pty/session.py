@@ -184,6 +184,42 @@ class Session:
         status = str(info.get("status") or "").lower()
         return status not in {"allowed", "allowed_warning"}
 
+    @staticmethod
+    def _queue_operation_matches_prompt(raw: dict, prompt: str) -> bool:
+        """Return whether an enqueue record can be attributed to ``prompt``.
+
+        Queue-operation records are also emitted for native child
+        notifications.  Treating any such record as confirmation of a
+        channel-delivered prompt suppresses the stdin fallback and can leave
+        the consumer waiting for an echo that will never arrive.  Only an
+        enqueue whose content contains this exact prompt (plain or inside the
+        known channel wrapper) is evidence for the current turn.
+        """
+
+        if (
+            raw.get("type") != "queue-operation"
+            or raw.get("operation") != "enqueue"
+        ):
+            return False
+        content = raw.get("content")
+        needle = str(prompt or "").strip()
+        if not isinstance(content, str) or not needle:
+            return False
+        candidate = content.strip()
+        if candidate == needle:
+            return True
+        if not (
+            candidate.startswith("<channel")
+            and candidate.endswith("</channel>")
+        ):
+            return False
+        opening_end = candidate.find(">")
+        closing_start = candidate.rfind("</channel>")
+        if opening_end < 0 or closing_start <= opening_end:
+            return False
+        wrapped = candidate[opening_end + 1 : closing_start].strip()
+        return wrapped == needle
+
     async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
 
@@ -900,9 +936,11 @@ class Session:
                             await self._activate_active_turn(
                                 turn_owner, turn_process
                             )
-                    elif raw.get("type") == "queue-operation":
-                        # CC queued our prompt behind an in-flight turn —
-                        # delivered, just not started yet. Don't re-send.
+                    elif self._queue_operation_matches_prompt(raw, text):
+                        # An exact enqueue for this prompt means CC accepted
+                        # it behind an in-flight turn.  Unrelated queue
+                        # operations (especially child notifications) must
+                        # leave the channel confirmation deadline intact.
                         confirm_deadline = None
                 for event in self._reader.normalize(
                     raw, include_user_text=not turn_started
