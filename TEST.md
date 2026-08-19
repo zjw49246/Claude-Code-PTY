@@ -8,6 +8,8 @@ uv run pytest -q tests/test_pool.py tests/test_pool_reaper.py
 
 `tests/test_pool.py` 必须覆盖 `Session.start` 在进程 spawn 后报错和调用方取消两条路径：未发布 Session 要先完成 shielded stop，才允许 `get_or_create` 重抛；重复取消也不能中断清理。
 
+`tests/test_turn_alignment.py` 必须覆盖活跃 turn steer 的三种不确定边界：ACK 超时不终止仍在工作的 Claude 且禁止同 turn 重投、迟到 ACK 仍由原消费者接管，以及消费者丢失时仍回收精确进程。
+
 ## 全量测试
 
 ```bash

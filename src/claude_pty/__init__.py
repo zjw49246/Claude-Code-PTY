@@ -11,6 +11,7 @@ from .exceptions import (
     PTYSpawnError,
     PTYDeadError,
     SessionError,
+    SteerDeliveryUncertainError,
     PoolExhaustedError,
 )
 
@@ -28,5 +29,6 @@ __all__ = [
     "PTYSpawnError",
     "PTYDeadError",
     "SessionError",
+    "SteerDeliveryUncertainError",
     "PoolExhaustedError",
 ]

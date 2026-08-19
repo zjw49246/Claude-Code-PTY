@@ -25,6 +25,7 @@ JsonlReader ──→ PTYEvent 流（与 CCM StreamParser 对齐）
 ```
 
 - **输入**：默认经 BridgeHub → channel_server 注入（MCP notification），可唤起 idle 会话开新 turn；stdin（bracketed-paste）仅作 fallback。注入返回 200 ≠ CC 真的消费了——`inject_confirm_timeout`（默认 15s）内 JSONL 无活动则 stdin 重投一次。
+- **活跃回合追加**：`steer_active_turn` 只有在匹配的 `queue-operation` ACK 后返回 `True`。stdin 已完整写入但 ACK 超时时抛出 `SteerDeliveryUncertainError`，调用方不得自动重试；Session 会冻结本回合的后续 steer，但让 Claude 完成正在执行的工作。
 - **输出**：轮询 session 对应的 JSONL transcript，normalize 成 `PTYEvent`。回合结束以 `system/turn_duration` 哨兵判定（交互模式每 turn 恰一条）；`isApiErrorMessage: true` 表示 turn 被 API 错误掐断，立即以错误事件收尾。
 - **注入隔离**：inject 端口由 OS 分配；注入负载带目标 session_id，不匹配回 409——防同机多宿主串话。
 - **启动免对话框**：spawn 前预写 `.claude.json` 的 trust 条目和 `hasCompletedOnboarding/theme`，drain loop 兜底自动应答 `Enter to confirm` 类提示。
@@ -50,7 +51,7 @@ uv sync --extra dev
 
 ```python
 import asyncio
-from claude_pty import Session
+from claude_pty import Session, SteerDeliveryUncertainError
 
 async def main():
     session = Session(cwd="/path/to/project")
@@ -68,6 +69,7 @@ asyncio.run(main())
 
 - `session.send_interrupt()` — 发 Esc 中断当前 turn
 - `session.inject(content)` — 不开 turn 的纯通道注入
+- `session.steer_active_turn(content, expected_process=...)` — 向已确认活跃的 turn 追加 stdin 指令；送达不确定时抛 `SteerDeliveryUncertainError`
 - `session.migrate_session(new_config_dir)` — 切换账号（换 `config_dir` 后 `--resume` 原会话）
 - `session.on_permission_request(handler)` / `resolve_permission(...)` — 权限请求回调与外部裁决
 - `Session(..., resume_existing=True)` — 恢复磁盘上已存在的 CC 会话（用 `--resume` 而非 `--session-id`）
@@ -108,6 +110,7 @@ session = await pool.get_or_create(cwd="/path/to/project")
 uv run pytest          # 全量
 uv run pytest tests/test_pool.py                 # 会话池/启动事务
 uv run pytest tests/test_inject_isolation.py     # 注入隔离
+uv run pytest tests/test_turn_alignment.py       # turn 对齐/活跃 steer
 ```
 
 设计文档在 `docs/`（`pty-solution.md`、`pty-interactive-mode.md` 等），历史经验教训见 `PROGRESS.md`。

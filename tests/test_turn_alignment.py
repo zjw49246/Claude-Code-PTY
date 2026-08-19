@@ -14,6 +14,7 @@ import pytest
 
 from claude_pty.config import PTYConfig
 from claude_pty.events import EventType
+from claude_pty.exceptions import SteerDeliveryUncertainError
 from claude_pty.jsonl_reader import JsonlReader
 from claude_pty.session import Session
 from claude_pty.subagents import SubagentTracker
@@ -703,7 +704,7 @@ class TestLiveSteering:
         assert session._pending_steer is None
         assert session._unsettled_steer_process is None
 
-    async def test_unacknowledged_write_stops_exact_process_before_failure(
+    async def test_unacknowledged_write_is_quarantined_until_turn_boundary(
         self, tmp_path
     ):
         config = PTYConfig(
@@ -722,13 +723,109 @@ class TestLiveSteering:
         _append(session, _user_text("initial task"))
         await self._wait_until(lambda: session.active_turn_process is not None)
 
-        assert await session.steer_active_turn("never acknowledged") is False
+        with pytest.raises(
+            SteerDeliveryUncertainError,
+            match="delivery is uncertain",
+        ):
+            await session.steer_active_turn("never acknowledged")
+
+        # A complete PTY write is an at-most-once side effect.  Missing JSONL
+        # acknowledgement must quarantine further steering, not kill Claude
+        # while its original turn is still doing useful work.
+        assert session._process.is_alive is True
+        assert session._process.stop_count == 0
+        assert session._pending_steer is not None
+        assert session._unsettled_steer_process is session._process
+        assert await session.steer_active_turn("must not be sent") is False
+        assert session._process.sent == ["initial task", "never acknowledged"]
+
+        _append(session, _assistant_text("original completed"), _turn_duration())
+        events = await turn
+        assert session._process.is_alive is True
+        assert session._process.stop_count == 0
+        assert session._pending_steer is None
+        assert session._unsettled_steer_process is None
+        assert not any(
+            event.event_type == EventType.SESSION_CRASHED for event in events
+        )
+
+    async def test_late_ack_after_uncertain_result_keeps_followup_aligned(
+        self, tmp_path
+    ):
+        config = PTYConfig(
+            jsonl_poll_interval=0.01,
+            post_response_wait=0.0,
+            response_timeout=1.0,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+            inject_confirm_timeout=0.05,
+        )
+        session = _make_session(tmp_path, config=config)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        with pytest.raises(SteerDeliveryUncertainError):
+            await session.steer_active_turn("late boundary update")
+
+        # Claude can publish the queue receipt just after the API-facing
+        # deadline. The original consumer must still own the boundary and
+        # collect the resulting next turn even though the caller has already
+        # received the delivery-uncertain result.
+        _append(
+            session,
+            _assistant_text("original completed"),
+            _turn_duration(),
+            _queue_operation("enqueue", "late boundary update"),
+            _queue_operation("dequeue"),
+            _user_text("late boundary update"),
+            _assistant_text("late followup completed"),
+            _turn_duration(),
+        )
+        events = await turn
+        contents = [event.content for event in events if event.content]
+        assert "original completed" in contents
+        assert "late followup completed" in contents
+        assert session._process.is_alive is True
+        assert session._process.stop_count == 0
+        assert session._pending_steer is None
+        assert session._unsettled_steer_process is None
+
+    async def test_unacknowledged_write_still_reaps_if_consumer_is_lost(
+        self, tmp_path
+    ):
+        config = PTYConfig(
+            jsonl_poll_interval=0.01,
+            post_response_wait=0.0,
+            response_timeout=1.0,
+            idle_poll_interval=0.01,
+            subagent_check_interval=0.01,
+            inject_confirm_timeout=0.05,
+        )
+        session = _make_session(tmp_path, config=config)
+        turn = asyncio.create_task(
+            self._collect(session.send_prompt("initial task"))
+        )
+        await self._wait_until(lambda: session._process.sent == ["initial task"])
+        _append(session, _user_text("initial task"))
+        await self._wait_until(lambda: session.active_turn_process is not None)
+
+        with pytest.raises(
+            SteerDeliveryUncertainError,
+            match="delivery is uncertain",
+        ):
+            await session.steer_active_turn("uncertain before cancellation")
+
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
         assert session._process.is_alive is False
         assert session._process.stop_count == 1
         assert session._pending_steer is None
         assert session._unsettled_steer_process is None
-        events = await turn
-        assert any(event.event_type == EventType.SESSION_CRASHED for event in events)
 
     async def test_api_error_reaps_process_before_unacked_steer_fails(
         self, tmp_path

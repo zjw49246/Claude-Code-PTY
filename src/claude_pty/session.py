@@ -13,7 +13,7 @@ from .pty_process import PTYProcess
 from .jsonl_reader import JsonlReader
 from .subagents import SubagentTracker
 from .bridge import BridgeHub
-from .exceptions import SessionError
+from .exceptions import SessionError, SteerDeliveryUncertainError
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class _PendingSteer:
     process: PTYProcess
     acknowledged: asyncio.Future[bool]
     enqueued: bool = False
+    delivery_uncertain: bool = False
     prewrite_message_ids: set[int] = dataclasses.field(default_factory=set)
 
 
@@ -404,17 +405,11 @@ class Session:
         pending: _PendingSteer,
         *,
         reason: str,
-        only_if_unacknowledged: bool = False,
     ) -> bool:
         """Revoke one ambiguous stdin write and stop its exact process."""
 
         process = pending.process
         async with self._turn_state_lock:
-            if only_if_unacknowledged and (
-                pending.acknowledged.done()
-                or self._pending_steer is not pending
-            ):
-                return False
             if self._pending_steer is pending:
                 self._pending_steer = None
             if self._unsettled_steer_process is process:
@@ -477,9 +472,13 @@ class Session:
         hosts that reuse one Session id across native process restarts.
 
         ``True`` proves both the complete bracketed-paste + Enter write and
-        CC's matching queue-operation acknowledgement.  If the write races
-        the original turn's terminal boundary, the same foreground consumer
-        follows the dequeued prompt through its next terminal sentinel.
+        CC's matching queue-operation acknowledgement. If the write completes
+        but no acknowledgement arrives before the configured deadline,
+        :class:`SteerDeliveryUncertainError` is raised: callers must not retry
+        automatically, while this Session quarantines further steering until
+        the original turn reaches an authoritative boundary. If the write
+        races that boundary, the same foreground consumer follows a proven
+        dequeued prompt through its next terminal sentinel.
         """
 
         if (
@@ -614,20 +613,23 @@ class Session:
                     self.session_id,
                     self.config.inject_confirm_timeout,
                 )
-                # Returning False while the write remains live would permit a
-                # retry to execute twice. Re-check once at the deadline edge,
-                # then stop the exact process before reporting failure.
-                revoked = await self._fail_closed_steer(
-                    pending,
-                    reason="an unacknowledged active-turn stdin write",
-                    only_if_unacknowledged=True,
-                )
-                if revoked:
-                    return False
-                return (
-                    bool(pending.acknowledged.result())
-                    if pending.acknowledged.done()
-                    else False
+                # The complete bracketed-paste + Enter write is already an
+                # at-most-once side effect. Re-check at the deadline edge, then
+                # quarantine this turn instead of killing a healthy Claude
+                # process that may still be inside a long tool call.
+                async with self._turn_state_lock:
+                    if pending.acknowledged.done():
+                        return bool(pending.acknowledged.result())
+                    if (
+                        self._pending_steer is not pending
+                        or self._unsettled_steer_process is not pending.process
+                    ):
+                        return False
+                    pending.delivery_uncertain = True
+                raise SteerDeliveryUncertainError(
+                    "Active-turn stdin write completed but Claude did not "
+                    "acknowledge it; delivery is uncertain and must not be "
+                    "retried automatically"
                 )
 
     # Channel server boots with CC's MCP startup; retry injection briefly
@@ -781,6 +783,7 @@ class Session:
                 api_error_in_batch = False
                 rate_limit_in_batch = False
                 enqueued_pending_in_batch: _PendingSteer | None = None
+                uncertain_terminal_in_batch: _PendingSteer | None = None
                 for raw in messages:
                     if (
                         not scan_started
@@ -847,6 +850,13 @@ class Session:
                         if self._pending_steer is not None:
                             terminal_deferred = True
                             self._active_turn_process = None
+                            if (
+                                self._pending_steer.delivery_uncertain
+                                and not self._pending_steer.enqueued
+                            ):
+                                uncertain_terminal_in_batch = (
+                                    self._pending_steer
+                                )
                         elif (
                             steer_followup_prompt is not None
                             and not steer_followup_started
@@ -862,6 +872,39 @@ class Session:
                                 self._unsettled_steer_process = None
                             self._active_turn_process = None
                             self._active_turn_owner = None
+
+                if (
+                    uncertain_terminal_in_batch is not None
+                    and self._pending_steer is uncertain_terminal_in_batch
+                    and not uncertain_terminal_in_batch.enqueued
+                    and not api_error_in_batch
+                    and not rate_limit_in_batch
+                ):
+                    # The original turn reached its durable terminal boundary
+                    # without ever recording this stdin update. That boundary
+                    # safely releases the quarantine: preserve the healthy PTY
+                    # and finish the useful response instead of manufacturing
+                    # a process crash solely to make delivery failure definite.
+                    self._pending_steer = None
+                    if (
+                        self._unsettled_steer_process
+                        is uncertain_terminal_in_batch.process
+                    ):
+                        self._unsettled_steer_process = None
+                    if not uncertain_terminal_in_batch.acknowledged.done():
+                        uncertain_terminal_in_batch.acknowledged.set_result(
+                            False
+                        )
+                    terminal_deferred = False
+                    batch_response_complete = True
+                    self._active_turn_process = None
+                    self._active_turn_owner = None
+                    logger.warning(
+                        "Session %s: preserving process after an uncertain "
+                        "stdin steer reached the original turn boundary "
+                        "without acknowledgement",
+                        self.session_id,
+                    )
 
                 if api_error_in_batch or rate_limit_in_batch:
                     # A provider error later in this same durable batch wins
