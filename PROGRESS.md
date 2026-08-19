@@ -1,5 +1,14 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-08-19 活跃回合注入 ACK 缺失时误杀健康 Claude
+
+- **现象**：CCM 已把完整的 bracketed-paste + Enter 写入活跃 Claude，但 `queue-operation` ACK 在 15 秒内没有出现；PTY 为防重复执行立即 SIGTERM，导致仍在正常工作的 Task 以 `exit_code=143` 异常结束。
+- **根因**：完整 stdin 写入已经产生不可撤销、至多一次的 provider 副作用；ACK 缺失只能证明送达结果不确定，不能证明未送达。通过杀进程把不确定状态强行变成失败，反而破坏了原本健康的工作。
+- **解决**（commit `c5194c1`）：ACK 超时抛出公开的 `SteerDeliveryUncertainError`，冻结同一 foreground turn 的后续 steer 且禁止自动重试；迟到 ACK 仍由原 consumer 对齐，原 turn 到达终态后释放冻结。只有部分写入、明确 provider 错误或 consumer 丢失时才回收精确进程。
+- **教训**：发送端完成写入与接收端确认是两个边界。缺失 ACK 必须暴露为 typed uncertainty 并保留 at-most-once 语义，不能用终止健康进程来伪造确定性。
+
+---
+
 ## 2026-07-27 Session.start 失败/取消遗留未跟踪 Claude 进程
 
 - **现象**：`SessionPool.get_or_create` 在 `Session.start` 已 spawn、尚未写入 `_sessions` 时被取消或遇到后续启动异常，调用方收到终态，但 Claude 子进程仍存活且不属于 pool，宿主无法再 STOP/回收它。
