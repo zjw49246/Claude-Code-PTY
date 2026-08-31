@@ -30,6 +30,17 @@ class _PendingSteer:
     prewrite_message_ids: set[int] = dataclasses.field(default_factory=set)
 
 
+class _PredicatePromptEchoMatcher:
+    """Compatibility adapter for reader doubles with the legacy predicate."""
+
+    def __init__(self, reader, prompt: str):
+        self._reader = reader
+        self._prompt = prompt
+
+    def observe(self, raw: dict) -> bool:
+        return self._reader.is_prompt_echo(raw, self._prompt)
+
+
 class Session:
     """High-level session combining PTYProcess + JsonlReader.
 
@@ -442,6 +453,12 @@ class Session:
             )
         return messages
 
+    def _new_prompt_echo_matcher(self, prompt: str):
+        factory = getattr(self._reader, "prompt_echo_matcher", None)
+        if callable(factory):
+            return factory(prompt)
+        return _PredicatePromptEchoMatcher(self._reader, prompt)
+
     @staticmethod
     async def _settle_blocking_input(call, *args) -> None:
         """Do not release input ownership while a cancelled thread still writes."""
@@ -741,7 +758,9 @@ class Session:
         # not complete this one. (If CC was mid-turn when the prompt arrived,
         # it queues the prompt and echoes it when the new turn begins.)
         turn_started = False
+        prompt_echo_matcher = self._new_prompt_echo_matcher(text)
         steer_followup_prompt: str | None = None
+        steer_followup_echo_matcher = None
         steer_followup_started = False
         terminal_deferred = False
         last_subagent_check = 0.0
@@ -784,12 +803,14 @@ class Session:
                 rate_limit_in_batch = False
                 enqueued_pending_in_batch: _PendingSteer | None = None
                 uncertain_terminal_in_batch: _PendingSteer | None = None
+                prompt_echo_ids: set[int] = set()
                 for raw in messages:
                     if (
                         not scan_started
-                        and self._reader.is_prompt_echo(raw, text)
+                        and prompt_echo_matcher.observe(raw)
                     ):
                         scan_started = True
+                        prompt_echo_ids.add(id(raw))
 
                     pending = self._pending_steer
                     if pending is not None:
@@ -811,6 +832,11 @@ class Session:
                         ):
                             if operation == "dequeue" or terminal_deferred:
                                 steer_followup_prompt = pending.content
+                                steer_followup_echo_matcher = (
+                                    self._new_prompt_echo_matcher(
+                                        steer_followup_prompt
+                                    )
+                                )
                                 steer_followup_started = False
                                 self._active_turn_process = None
                             elif (
@@ -825,9 +851,8 @@ class Session:
                     if (
                         steer_followup_prompt is not None
                         and not steer_followup_started
-                        and self._reader.is_prompt_echo(
-                            raw, steer_followup_prompt
-                        )
+                        and steer_followup_echo_matcher is not None
+                        and steer_followup_echo_matcher.observe(raw)
                     ):
                         steer_followup_started = True
                         terminal_deferred = False
@@ -967,7 +992,7 @@ class Session:
                 if raw.get("isApiErrorMessage"):
                     api_error_turn = True
                 if not turn_started:
-                    if self._reader.is_prompt_echo(raw, text):
+                    if id(raw) in prompt_echo_ids:
                         turn_started = True
                         confirm_deadline = None  # delivery confirmed
                         if not (

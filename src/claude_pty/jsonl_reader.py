@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import AsyncIterator
 
@@ -22,6 +23,127 @@ _SKIP_TYPES = frozenset(
 _SKIP_SUBTYPES = frozenset(
     {"thinking_tokens", "token_usage", "api_request", "api_response"}
 )
+
+_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+_IMAGE_MARKER_RE = re.compile(r"\[Image #\d+\]")
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _local_image_path(value: str) -> str | None:
+    candidate = value.strip().strip("`\"'")
+    if not candidate:
+        return None
+    if os.path.splitext(candidate)[1].lower() not in _IMAGE_EXTENSIONS:
+        return None
+    if not (
+        os.path.isabs(candidate)
+        or candidate.startswith(("./", "../", "~/", "\\\\"))
+        or _WINDOWS_ABSOLUTE_PATH_RE.match(candidate)
+    ):
+        return None
+    return candidate
+
+
+def _multimodal_prompt_shape(prompt: str) -> tuple[str | None, tuple[str, ...]]:
+    """Return the text/path evidence Claude records for image attachments."""
+
+    normalized_lines: list[str] = []
+    image_paths: list[str] = []
+    for line in prompt.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        line_ending = line[len(body):]
+        match = re.fullmatch(
+            r"(?P<prefix>\s*(?:[-*+]\s+)?)(?P<path>.*?)(?P<trailing>\s*)",
+            body,
+        )
+        image_path = (
+            _local_image_path(match.group("path"))
+            if match is not None
+            else None
+        )
+        if image_path is not None:
+            normalized_lines.append(match.group("prefix").rstrip() + line_ending)
+            image_paths.append(image_path)
+        else:
+            normalized_lines.append(line)
+    if not image_paths:
+        return None, ()
+    return "".join(normalized_lines).strip(), tuple(image_paths)
+
+
+def _user_texts(raw: dict) -> tuple[str, ...]:
+    if raw.get("type") != "user":
+        return ()
+    message = raw.get("message", {})
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return (content,)
+    if not isinstance(content, list):
+        return ()
+    return tuple(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def _image_source_path(raw: dict) -> str | None:
+    texts = _user_texts(raw)
+    if len(texts) != 1:
+        return None
+    text = texts[0].strip()
+    prefix = "[Image: source: "
+    if not text.startswith(prefix) or not text.endswith("]"):
+        return None
+    return text[len(prefix):-1]
+
+
+class PromptEchoMatcher:
+    """Correlate one delivered prompt with its native JSONL user records."""
+
+    def __init__(self, prompt: str):
+        self.prompt = prompt.strip()
+        self._image_text, self._image_paths = _multimodal_prompt_shape(
+            self.prompt
+        )
+        self._pending_image_sources: tuple[str, ...] = ()
+
+    def observe(self, raw: dict) -> bool:
+        texts = _user_texts(raw)
+        if self.prompt and any(self.prompt in text for text in texts):
+            self._pending_image_sources = ()
+            return True
+
+        if self._pending_image_sources:
+            if raw.get("type") in _SKIP_TYPES:
+                return False
+            source_path = _image_source_path(raw)
+            if source_path == self._pending_image_sources[0]:
+                self._pending_image_sources = self._pending_image_sources[1:]
+                return not self._pending_image_sources
+            self._pending_image_sources = ()
+
+        if self._image_text is None or not isinstance(
+            raw.get("message"), dict
+        ):
+            return False
+        content = raw["message"].get("content")
+        if not isinstance(content, list):
+            return False
+        image_count = sum(
+            1
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "image"
+        )
+        if image_count != len(self._image_paths):
+            return False
+        if not any(
+            self._image_text in _IMAGE_MARKER_RE.sub("", text)
+            for text in texts
+        ):
+            return False
+        self._pending_image_sources = self._image_paths
+        return False
 
 
 class JsonlReader:
@@ -405,24 +527,13 @@ class JsonlReader:
         may still sit unread in the file — counting one of those would end
         the new turn with the previous turn's output (the task-87 off-by-one).
         """
-        if raw.get("type") != "user":
-            return False
-        message = raw.get("message", {})
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, str):
-            texts = [content]
-        elif isinstance(content, list):
-            texts = [
-                b.get("text", "")
-                for b in content
-                if isinstance(b, dict) and b.get("type") == "text"
-            ]
-        else:
-            return False
         needle = prompt.strip()
         if not needle:
             return False
-        return any(needle in t for t in texts)
+        return any(needle in text for text in _user_texts(raw))
+
+    def prompt_echo_matcher(self, prompt: str) -> PromptEchoMatcher:
+        return PromptEchoMatcher(prompt)
 
     def is_response_complete(self, raw: dict) -> bool:
         """Turn-complete sentinel for interactive-mode JSONL.

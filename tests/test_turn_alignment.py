@@ -28,6 +28,33 @@ def _user_text(text):
     return {"type": "user", "message": {"role": "user", "content": text}}
 
 
+def _user_image_echo(text, *, image_count=1):
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                *[
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "iVBORw0KGgo=",
+                        },
+                    }
+                    for _ in range(image_count)
+                ],
+            ],
+        },
+    }
+
+
+def _image_source_echo(path):
+    return _user_text(f"[Image: source: {path}]")
+
+
 def _assistant_text(text):
     return {
         "type": "assistant",
@@ -211,6 +238,76 @@ class TestPromptEcho:
             },
         }
         assert r.is_prompt_echo(raw, "hello world") is True
+
+    def test_image_attachment_echo_matches_after_cli_path_conversion(self):
+        r = JsonlReader("/nonexistent")
+        image_path = (
+            "/srv/ccm/uploads/11111111-1111-4111-8111-111111111111.png"
+        )
+        prompt = (
+            "检查截图中的状态\n\n"
+            "请用 Read 工具查看以下文件：\n"
+            f"- {image_path}"
+        )
+        matcher = r.prompt_echo_matcher(prompt)
+
+        assert matcher.observe(
+            _user_image_echo(
+                "[Image #16]检查截图中的状态\n\n"
+                "请用 Read 工具查看以下文件：\n-"
+            )
+        ) is False
+        assert matcher.observe(_image_source_echo(image_path)) is True
+
+    def test_multiple_image_sources_must_match_in_prompt_order(self):
+        r = JsonlReader("/nonexistent")
+        first = "/srv/ccm/uploads/first image.png"
+        second = "/srv/ccm/uploads/second.jpg"
+        prompt = (
+            "比较截图\n\n请用 Read 工具查看以下文件：\n"
+            f"- {first}\n- notes.txt\n- {second}"
+        )
+        matcher = r.prompt_echo_matcher(prompt)
+
+        assert matcher.observe(
+            _user_image_echo(
+                "[Image #3][Image #4]比较截图\n\n"
+                "请用 Read 工具查看以下文件：\n-\n- notes.txt\n-",
+                image_count=2,
+            )
+        ) is False
+        assert matcher.observe(_image_source_echo(first)) is False
+        assert matcher.observe(_image_source_echo(second)) is True
+
+    def test_unrelated_image_attachment_echo_does_not_match(self):
+        r = JsonlReader("/nonexistent")
+        expected_path = "/srv/ccm/uploads/expected.png"
+        prompt = (
+            "检查截图\n\n"
+            "请用 Read 工具查看以下文件：\n"
+            f"- {expected_path}"
+        )
+        matcher = r.prompt_echo_matcher(prompt)
+
+        assert matcher.observe(
+            _user_image_echo(
+                "[Image #17]检查截图\n\n"
+                "请用 Read 工具查看以下文件：\n-"
+            )
+        ) is False
+        assert matcher.observe(
+            _image_source_echo("/srv/ccm/uploads/other.png")
+        ) is False
+
+    def test_text_only_echo_cannot_omit_attachment_path(self):
+        r = JsonlReader("/nonexistent")
+        prompt = (
+            "检查截图\n\n请用 Read 工具查看以下文件：\n"
+            "- /srv/ccm/uploads/screen.png"
+        )
+
+        raw = _user_text("检查截图\n\n请用 Read 工具查看以下文件：\n-")
+        assert r.is_prompt_echo(raw, prompt) is False
 
     def test_other_user_message_no_match(self):
         r = JsonlReader("/nonexistent")
@@ -408,6 +505,87 @@ class TestTurnAlignment:
         assert not any(e.orphan for e in events)
         replies = [e for e in events if e.event_type == EventType.MESSAGE]
         assert [e.content for e in replies] == ["普通回答"]
+
+    async def test_image_attachment_echo_starts_and_completes_turn(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        prompt = (
+            "比较两个结果\n\n请用 Read 工具查看以下文件：\n"
+            "- /srv/ccm/uploads/result.png"
+        )
+
+        async def cc_responds():
+            await asyncio.sleep(0.05)
+            _append(
+                session,
+                _user_image_echo(
+                    "[Image #4]比较两个结果\n\n"
+                    "请用 Read 工具查看以下文件：\n-"
+                ),
+                _image_source_echo("/srv/ccm/uploads/result.png"),
+                _assistant_text("图片分析完成"),
+                _turn_duration(),
+            )
+
+        writer = asyncio.create_task(cc_responds())
+        events = [e async for e in session.send_prompt(prompt, timeout=0.3)]
+        await writer
+
+        replies = [
+            e
+            for e in events
+            if e.event_type == EventType.MESSAGE and e.role == "assistant"
+        ]
+        assert [e.content for e in replies] == ["图片分析完成"]
+        assert not any(e.orphan for e in replies)
+        assert not any(
+            e.event_type == EventType.SYSTEM_EVENT and e.is_error
+            for e in events
+        )
+
+    async def test_same_text_with_different_image_stays_turn_aligned(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+        expected_path = "/srv/ccm/uploads/new.png"
+        prompt = (
+            "检查截图\n\n请用 Read 工具查看以下文件：\n"
+            f"- {expected_path}"
+        )
+
+        async def cc_responds():
+            await asyncio.sleep(0.05)
+            common_echo = (
+                "[Image #8]检查截图\n\n"
+                "请用 Read 工具查看以下文件：\n-"
+            )
+            _append(
+                session,
+                _user_image_echo(common_echo),
+                _image_source_echo("/srv/ccm/uploads/old.png"),
+                _assistant_text("旧截图回答"),
+                _turn_duration(),
+            )
+            await asyncio.sleep(0.05)
+            _append(
+                session,
+                _user_image_echo(common_echo),
+                _image_source_echo(expected_path),
+                _assistant_text("新截图回答"),
+                _turn_duration(),
+            )
+
+        writer = asyncio.create_task(cc_responds())
+        events = [e async for e in session.send_prompt(prompt, timeout=0.5)]
+        await writer
+
+        assert any(
+            e.orphan and e.content == "旧截图回答" for e in events
+        )
+        assert any(
+            not e.orphan and e.content == "新截图回答" for e in events
+        )
 
     async def test_unrelated_queue_operation_does_not_cancel_channel_fallback(
         self, tmp_path
