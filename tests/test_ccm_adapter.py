@@ -286,6 +286,32 @@ class TestForceKillScoping:
         assert "sid-cur" not in backend._pool._sessions
 
 
+class TestLaunchPolicy:
+    async def test_launch_merges_host_disallowed_tools(self, backend):
+        captured = {}
+
+        async def fake_launch(**kwargs):
+            captured.update(kwargs)
+            return "policy-session"
+
+        backend.launch = fake_launch
+
+        await backend.launch_for_ccm(
+            instance_id=17,
+            prompt="inspect",
+            task_id=91,
+            cwd="/work",
+            enable_workflows=False,
+            disallowed_tools=["EnterPlanMode", "ExitPlanMode"],
+        )
+
+        assert captured["disallowed_tools"] == [
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "Workflow",
+        ]
+
+
 class TestBasePassesSession:
     async def test_consume_passes_session_to_on_exit(self):
         from claude_pty.adapters.base import BasePTYBackend

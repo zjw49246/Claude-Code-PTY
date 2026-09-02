@@ -113,6 +113,11 @@ class Session:
         # consumer those events used to pile up unread and got misattributed
         # to the NEXT prompt (task-87 off-by-one incident).
         self.on_autonomous_event = None  # async (PTYEvent) -> None
+        # Host-owned background lifecycles may outlive both the foreground
+        # prompt and every native sub-agent.  While such a lifecycle retains
+        # the exact Session object, the periodic pool reaper must not mistake
+        # JSONL silence for an unused resident process.
+        self._idle_reap_holds: set[object] = set()
 
     @property
     def session_id(self) -> str | None:
@@ -160,6 +165,24 @@ class Session:
         is silent, but a sub-agent is still working and will wake it.
         """
         return self._tracker.has_pending
+
+    @property
+    def idle_reap_protected(self) -> bool:
+        """Whether a host lifecycle currently retains this exact Session."""
+
+        return bool(self._idle_reap_holds)
+
+    def acquire_idle_reap_hold(self) -> object:
+        """Keep this Session resident until the returned token is released."""
+
+        token = object()
+        self._idle_reap_holds.add(token)
+        return token
+
+    def release_idle_reap_hold(self, token: object) -> None:
+        """Release one exact host-owned residency token idempotently."""
+
+        self._idle_reap_holds.discard(token)
 
     @property
     def rate_limited(self) -> bool:
@@ -1300,25 +1323,36 @@ class Session:
         )
 
     async def stop(self) -> None:
-        if self._idle_watcher_task is not None:
-            self._idle_watcher_task.cancel()
-            self._idle_watcher_task = None
-        if self._bridge and self.session_id:
-            self._bridge.unregister_session(self.session_id)
-        async with self._turn_state_lock:
-            self._active_turn_process = None
-            self._active_turn_owner = None
-            pending, self._pending_steer = self._pending_steer, None
-            self._unsettled_steer_process = None
-            self._prefetched_messages.clear()
-        process = self._process
+        watcher, self._idle_watcher_task = self._idle_watcher_task, None
+        current_task = asyncio.current_task()
+        watcher_is_current = watcher is not None and watcher is current_task
+        if watcher is not None and not watcher_is_current:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
         try:
-            if process:
-                await self._settle_blocking_input(process.stop)
+            if self._bridge and self.session_id:
+                self._bridge.unregister_session(self.session_id)
+            async with self._turn_state_lock:
+                self._active_turn_process = None
+                self._active_turn_owner = None
+                pending, self._pending_steer = self._pending_steer, None
+                self._unsettled_steer_process = None
+                self._prefetched_messages.clear()
+            process = self._process
+            try:
+                if process:
+                    await self._settle_blocking_input(process.stop)
+            finally:
+                # Never report an injection failure until its exact process has
+                # been reaped (or the stop attempt itself has failed visibly).
+                if pending is not None and not pending.acknowledged.done():
+                    pending.acknowledged.set_result(False)
+                self._started = False
+            logger.info("Session %s stopped", self.session_id)
         finally:
-            # Never report an injection failure until its exact process has
-            # been reaped (or the stop attempt itself has failed visibly).
-            if pending is not None and not pending.acknowledged.done():
-                pending.acknowledged.set_result(False)
-            self._started = False
-        logger.info("Session %s stopped", self.session_id)
+            self._idle_reap_holds.clear()
+            # An autonomous callback may stop its own Session. Cancelling the
+            # current watcher before the cleanup awaits above would abort that
+            # cleanup; waiting on it would deadlock. Retire it on return.
+            if watcher_is_current:
+                watcher.cancel()

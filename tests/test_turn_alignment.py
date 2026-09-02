@@ -1280,6 +1280,82 @@ class TestLiveSteering:
 
 
 class TestIdleWatcher:
+    async def test_idle_reap_hold_is_exact_and_idempotent(self, tmp_path):
+        session = _make_session(tmp_path)
+
+        first = session.acquire_idle_reap_hold()
+        second = session.acquire_idle_reap_hold()
+        assert session.idle_reap_protected is True
+
+        session.release_idle_reap_hold(first)
+        session.release_idle_reap_hold(first)
+        assert session.idle_reap_protected is True
+
+        session.release_idle_reap_hold(second)
+        assert session.idle_reap_protected is False
+
+    async def test_stop_waits_for_idle_watcher_callback_retirement(self, tmp_path):
+        session = _make_session(tmp_path)
+        callback_started = asyncio.Event()
+        callback_cancelled = asyncio.Event()
+        allow_callback_exit = asyncio.Event()
+
+        async def cb(event):
+            callback_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                callback_cancelled.set()
+                await allow_callback_exit.wait()
+                raise
+
+        session.on_autonomous_event = cb
+        watcher = asyncio.create_task(session._idle_watcher())
+        session._idle_watcher_task = watcher
+        _append(session, _assistant_text("autonomous event"))
+        await asyncio.wait_for(callback_started.wait(), timeout=1.0)
+
+        stop_task = asyncio.create_task(session.stop())
+        await asyncio.wait_for(callback_cancelled.wait(), timeout=1.0)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.1)
+        assert not stop_task.done()
+
+        allow_callback_exit.set()
+        await asyncio.wait_for(stop_task, timeout=1.0)
+
+        assert watcher.cancelled()
+        assert session._idle_watcher_task is None
+        assert session._started is False
+
+    async def test_idle_watcher_callback_can_stop_its_own_session(self, tmp_path):
+        session = _make_session(tmp_path)
+        stop_returned = asyncio.Event()
+
+        async def cb(event):
+            await session.stop()
+            stop_returned.set()
+
+        session.on_autonomous_event = cb
+        watcher = asyncio.create_task(session._idle_watcher())
+        session._idle_watcher_task = watcher
+        _append(session, _assistant_text("stop from callback"))
+
+        try:
+            await asyncio.wait_for(stop_returned.wait(), timeout=1.0)
+            await asyncio.wait_for(
+                asyncio.gather(watcher, return_exceptions=True),
+                timeout=1.0,
+            )
+        finally:
+            if not watcher.done():
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+
+        assert watcher.cancelled()
+        assert session._idle_watcher_task is None
+        assert session._started is False
+
     async def test_idle_watcher_drains_prefetched_handoff(self, tmp_path):
         session = _make_session(tmp_path)
         received: list = []

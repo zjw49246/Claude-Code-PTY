@@ -417,8 +417,9 @@ class CCMBackend(BasePTYBackend):
         enable_workflows: bool = False,
         enabled_skills: dict | None = None,
         mcp_config_path: str | None = None,
+        disallowed_tools: list[str] | None = None,
     ) -> str:
-        disallowed = []
+        disallowed = list(disallowed_tools or ())
         if not enable_workflows:
             disallowed.append("Workflow")
         if enabled_skills:
@@ -487,7 +488,9 @@ class CCMBackend(BasePTYBackend):
             effort_level=effort_level,
             chat_initiated=chat_initiated,
             config_dir=config_dir,
-            disallowed_tools=disallowed if disallowed else None,
+            disallowed_tools=(
+                list(dict.fromkeys(disallowed)) if disallowed else None
+            ),
             mcp_config_path=mcp_config_path,
         )
 

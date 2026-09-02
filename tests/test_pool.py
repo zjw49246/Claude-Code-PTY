@@ -21,6 +21,7 @@ def _make_mock_session(alive=True, idle=0.0, locked=False):
     session._send_lock = MagicMock()
     session._send_lock.locked.return_value = locked
     session.has_pending_subagents = False
+    session.idle_reap_protected = False
     session.stop = AsyncMock()
     return session
 
@@ -93,6 +94,18 @@ class TestSessionPool:
 
         evicted = await pool._evict_one()
         assert evicted is False
+
+    async def test_evict_fails_when_all_sessions_have_host_holds(self):
+        pool = SessionPool(config=PTYConfig(max_sessions=1, idle_timeout=10))
+
+        retained = _make_mock_session(idle=500.0)
+        retained.idle_reap_protected = True
+        pool._sessions = {"retained": retained}
+        pool._access_order = {"retained": 1.0}
+
+        assert await pool._evict_one() is False
+        retained.stop.assert_not_awaited()
+        assert pool._sessions["retained"] is retained
 
     async def test_get_returns_existing(self):
         pool = SessionPool()

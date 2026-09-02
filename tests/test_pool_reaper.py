@@ -13,10 +13,16 @@ from claude_pty.pool import SessionPool
 
 
 class FakeSession:
-    def __init__(self, idle: float = 0.0, pending_subagents: bool = False):
+    def __init__(
+        self,
+        idle: float = 0.0,
+        pending_subagents: bool = False,
+        idle_reap_protected: bool = False,
+    ):
         self._idle = idle
         self._send_lock = asyncio.Lock()
         self._pending = pending_subagents
+        self._idle_reap_protected = idle_reap_protected
         self.stopped = False
 
     @property
@@ -26,6 +32,10 @@ class FakeSession:
     @property
     def has_pending_subagents(self) -> bool:
         return self._pending
+
+    @property
+    def idle_reap_protected(self) -> bool:
+        return self._idle_reap_protected
 
     async def stop(self):
         self.stopped = True
@@ -70,6 +80,15 @@ class TestReapIdle:
 
         assert await pool.reap_idle() == 0
         assert not waiting.stopped
+
+    async def test_skips_sessions_retained_by_host_background_lifecycle(self):
+        pool = _pool(idle_reap_after=100)
+        retained = FakeSession(idle=500, idle_reap_protected=True)
+        pool._sessions = {"retained": retained}
+
+        assert await pool.reap_idle() == 0
+        assert not retained.stopped
+        assert pool._sessions["retained"] is retained
 
     async def test_stop_failure_still_removes_from_pool(self):
         pool = _pool(idle_reap_after=100)

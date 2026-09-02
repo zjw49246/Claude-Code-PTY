@@ -69,6 +69,15 @@ class SessionPool:
         self._reaper_task: asyncio.Task | None = None
 
     @staticmethod
+    def _has_resident_work(session: Session) -> bool:
+        """Return whether automatic eviction must retain this Session."""
+
+        return bool(
+            session.has_pending_subagents
+            or getattr(session, "idle_reap_protected", False)
+        )
+
+    @staticmethod
     def _allocate_inject_port() -> int:
         """Pick a free port for a session's channel server.
 
@@ -167,7 +176,7 @@ class SessionPool:
         for sid, session in self._sessions.items():
             if (
                 session.idle_seconds >= self.config.idle_timeout
-                and not session.has_pending_subagents
+                and not self._has_resident_work(session)
             ):
                 candidates.append((self._access_order.get(sid, 0), sid))
 
@@ -176,7 +185,7 @@ class SessionPool:
             for sid, session in self._sessions.items():
                 if (
                     not session._send_lock.locked()
-                    and not session.has_pending_subagents
+                    and not self._has_resident_work(session)
                 ):
                     candidates.append((self._access_order.get(sid, 0), sid))
 
@@ -259,7 +268,7 @@ class SessionPool:
                 sid for sid, session in self._sessions.items()
                 if session.idle_seconds >= self.config.idle_reap_after
                 and not session._send_lock.locked()
-                and not session.has_pending_subagents
+                and not self._has_resident_work(session)
             ]
             reaped = 0
             for sid in expired:
