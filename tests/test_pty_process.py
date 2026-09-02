@@ -4,9 +4,10 @@ import json
 import os
 import tempfile
 import threading
+import time
 
 from claude_pty.config import PTYConfig
-from claude_pty.pty_process import PTYProcess
+from claude_pty.pty_process import PTYProcess, _prompt_image_paths
 
 
 class TestJsonlPath:
@@ -153,6 +154,139 @@ class TestInputSerialization:
             b"\x1b[200~second\x1b[201~",
             b"\r",
         ]
+
+    def test_image_prompt_waits_for_async_cache_before_enter(
+        self, monkeypatch, tmp_path
+    ):
+        proc = PTYProcess(
+            cwd="/p",
+            session_id="image-session",
+            config=PTYConfig(
+                config_dir=str(tmp_path),
+                image_paste_timeout=1.0,
+                image_paste_poll_interval=0.01,
+            ),
+        )
+
+        class FakeChild:
+            @staticmethod
+            def poll():
+                return None
+
+        proc.proc = FakeChild()
+        proc.master_fd = 10
+        proc._running = True
+        writes: list[bytes] = []
+
+        def record_write(_fd, payload):
+            payload = bytes(payload)
+            writes.append(payload)
+            if payload.startswith(b"\x1b[200~"):
+                cache_dir = tmp_path / "image-cache" / "image-session"
+
+                def materialize():
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    (cache_dir / "1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+                threading.Timer(0.08, materialize).start()
+            return len(payload)
+
+        monkeypatch.setattr("claude_pty.pty_process.os.write", record_write)
+        started = time.monotonic()
+        proc.send_prompt("请查看图片：\n- /tmp/reference.png")
+
+        assert writes[0].startswith(b"\x1b[200~")
+        assert writes[-1] == b"\r"
+        assert time.monotonic() - started >= 0.07
+
+    def test_annotated_image_prompt_waits_for_cache(self, monkeypatch, tmp_path):
+        """The live follow-up format includes a reader-tool annotation."""
+
+        assert _prompt_image_paths(
+            "请查看图片：\n- /tmp/reference.png（使用 Read/View Image）"
+        ) == ("/tmp/reference.png",)
+
+        proc = PTYProcess(
+            cwd="/p",
+            session_id="annotated-image-session",
+            config=PTYConfig(
+                config_dir=str(tmp_path),
+                image_paste_timeout=1.0,
+                image_paste_poll_interval=0.01,
+            ),
+        )
+
+        class FakeChild:
+            @staticmethod
+            def poll():
+                return None
+
+        proc.proc = FakeChild()
+        proc.master_fd = 10
+        proc._running = True
+        writes: list[bytes] = []
+
+        def record_write(_fd, payload):
+            payload = bytes(payload)
+            writes.append(payload)
+            if payload.startswith(b"\x1b[200~"):
+                cache_dir = tmp_path / "image-cache" / "annotated-image-session"
+
+                def materialize():
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    (cache_dir / "1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+                threading.Timer(0.08, materialize).start()
+            return len(payload)
+
+        monkeypatch.setattr("claude_pty.pty_process.os.write", record_write)
+        started = time.monotonic()
+        proc.send_prompt(
+            "请查看图片：\n- /tmp/reference.png（使用 Read/View Image）"
+        )
+
+        assert writes[0].startswith(b"\x1b[200~")
+        assert writes[-1] == b"\r"
+        assert time.monotonic() - started >= 0.07
+
+    def test_existing_cache_is_not_counted_for_new_images(
+        self, monkeypatch, tmp_path
+    ):
+        proc = PTYProcess(
+            cwd="/p",
+            session_id="multi-image-session",
+            config=PTYConfig(
+                config_dir=str(tmp_path),
+                image_paste_timeout=1.0,
+                image_paste_poll_interval=0.01,
+            ),
+        )
+        cache_dir = tmp_path / "image-cache" / "multi-image-session"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "1.png").write_bytes(b"old")
+
+        class FakeChild:
+            @staticmethod
+            def poll():
+                return None
+
+        proc.proc = FakeChild()
+        proc.master_fd = 10
+        proc._running = True
+        writes: list[bytes] = []
+
+        def record_write(_fd, payload):
+            payload = bytes(payload)
+            writes.append(payload)
+            if payload.startswith(b"\x1b[200~"):
+                (cache_dir / "2.png").write_bytes(b"new-1")
+                (cache_dir / "3.jpg").write_bytes(b"new-2")
+            return len(payload)
+
+        monkeypatch.setattr("claude_pty.pty_process.os.write", record_write)
+        proc.send_prompt("比较图片：\n- /tmp/one.png\n- /tmp/two.jpg")
+
+        assert writes[-1] == b"\r"
 
 
 class TestSetupMcpConfig:

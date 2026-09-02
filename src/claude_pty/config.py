@@ -50,6 +50,12 @@ class PTYConfig:
     # How often the reaper scans the pool.
     idle_reap_interval: float = 300.0
 
+    # Claude converts local image paths asynchronously after a bracketed paste.
+    # Wait for the per-session image cache before submitting Enter so the
+    # submit key cannot be consumed while the image is still being decoded.
+    image_paste_timeout: float = 30.0
+    image_paste_poll_interval: float = 0.05
+
     max_restart_attempts: int = 3
     restart_backoff_base: float = 2.0
 

@@ -46,6 +46,14 @@ _RATE_LIMIT_MARKERS = (
     "sessionlimitreached",
 )
 
+_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_IMAGE_ATTACHMENT_LINE_RE = re.compile(
+    r"^(?P<path>.+?\.(?:png|jpg|jpeg|gif|webp))"
+    r"(?:\s*(?:（[^（）]*）|\([^()]*\)))?$",
+    re.IGNORECASE,
+)
+
 
 def _match_rate_limit(collapsed_lower: str) -> bool:
     return any(m in collapsed_lower for m in _RATE_LIMIT_MARKERS)
@@ -55,6 +63,41 @@ def _collapse_for_prompt_match(data: bytes) -> str:
     """Strip ANSI escapes and collapse all whitespace for marker matching."""
     text = _ANSI_RE.sub("", data.decode("utf-8", errors="replace"))
     return re.sub(r"\s+", "", text)
+
+
+def _prompt_image_paths(text: str) -> tuple[str, ...]:
+    """Extract attachment paths that Claude will asynchronously decode.
+
+    CCM renders managed attachments as one path per bullet. Restricting the
+    match to a whole line avoids treating an incidental ``.png`` mention in
+    ordinary prose as an image upload.
+    """
+
+    paths: list[str] = []
+    for line in text.splitlines():
+        candidate = line.strip()
+        if candidate[:2] in {"- ", "* ", "+ "}:
+            candidate = candidate[2:].strip()
+        candidate = candidate.strip("`\"'")
+        if not candidate:
+            continue
+        # Follow-up injection prompts annotate each attachment with the
+        # reader tool, e.g. ``- /uploads/x.png（使用 Read/View Image）``.
+        # Extract the path before validating its absolute/relative shape.
+        match = _IMAGE_ATTACHMENT_LINE_RE.fullmatch(candidate)
+        if match is None:
+            continue
+        candidate = match.group("path")
+        if os.path.splitext(candidate)[1].lower() not in _IMAGE_EXTENSIONS:
+            continue
+        if not (
+            os.path.isabs(candidate)
+            or candidate.startswith(("./", "../", "~/", "\\\\"))
+            or _WINDOWS_ABSOLUTE_PATH_RE.match(candidate)
+        ):
+            continue
+        paths.append(candidate)
+    return tuple(paths)
 
 
 class PTYProcess:
@@ -415,9 +458,82 @@ class PTYProcess:
                 self.session_id[:8], len(text), master_fd,
             )
             payload = b"\x1b[200~" + text.encode("utf-8") + b"\x1b[201~"
+            image_paths = _prompt_image_paths(text)
+            image_cache_before = self._image_cache_snapshot() if image_paths else {}
             self._write_all(master_fd, payload)
-            time.sleep(0.15)  # let Ink process the paste before submitting
+            if image_paths:
+                self._wait_for_image_paste(
+                    image_count=len(image_paths),
+                    before=image_cache_before,
+                )
+            else:
+                time.sleep(0.15)  # let Ink process the paste before submitting
             self._write_all(master_fd, b"\r")
+
+    def _image_cache_snapshot(self) -> dict[str, tuple[int, int]]:
+        """Return name -> (mtime_ns, size) for this session's image cache."""
+
+        config_base = self.config.config_dir or os.path.expanduser("~/.claude")
+        cache_dir = os.path.join(config_base, "image-cache", self.session_id)
+        try:
+            entries = os.scandir(cache_dir)
+        except OSError:
+            return {}
+        snapshot: dict[str, tuple[int, int]] = {}
+        with entries:
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if os.path.splitext(entry.name)[1].lower() not in _IMAGE_EXTENSIONS:
+                    continue
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                snapshot[entry.name] = (stat.st_mtime_ns, stat.st_size)
+        return snapshot
+
+    def _wait_for_image_paste(
+        self,
+        *,
+        image_count: int,
+        before: dict[str, tuple[int, int]],
+    ) -> None:
+        """Wait until Claude has materialized all pasted image attachments.
+
+        The cache is written by Claude's TUI, not by this library. A bounded
+        wait keeps unsupported/missing paths from wedging input forever; the
+        warning makes that degraded path visible to the host.
+        """
+
+        deadline = time.monotonic() + max(
+            0.0, float(self.config.image_paste_timeout)
+        )
+        poll_interval = max(0.01, float(self.config.image_paste_poll_interval))
+        while time.monotonic() < deadline:
+            if not self.is_alive:
+                return
+            current = self._image_cache_snapshot()
+            changed = sum(
+                1
+                for name, identity in current.items()
+                if before.get(name) != identity
+            )
+            if changed >= image_count:
+                logger.debug(
+                    "image paste ready[%s]: %d attachment(s)",
+                    self.session_id[:8],
+                    image_count,
+                )
+                return
+            time.sleep(poll_interval)
+        logger.warning(
+            "image paste[%s]: cache did not materialize %d attachment(s) "
+            "within %.1fs; submitting anyway",
+            self.session_id[:8],
+            image_count,
+            max(0.0, float(self.config.image_paste_timeout)),
+        )
 
     def send_interrupt(self) -> None:
         with self._input_lock:
