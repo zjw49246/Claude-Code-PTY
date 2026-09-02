@@ -29,6 +29,21 @@ _IMAGE_MARKER_RE = re.compile(r"\[Image #\d+\]")
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
+def _normalize_multimodal_text(value: str) -> str:
+    """Normalize formatting Claude drops when serializing image prompts.
+
+    Interactive Claude currently removes empty lines from the text block of a
+    user message as soon as that message contains an image.  The prompt sent
+    through PTY still has those lines, so comparing the two raw strings would
+    fail even though the text and image are the same.  Keep all meaningful
+    spacing while treating one or more blank lines as a single line break.
+    """
+
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"\n[ \t]*(?:\n[ \t]*)+", "\n", value)
+    return value.strip()
+
+
 def _local_image_path(value: str) -> str | None:
     candidate = value.strip().strip("`\"'")
     if not candidate:
@@ -68,7 +83,9 @@ def _multimodal_prompt_shape(prompt: str) -> tuple[str | None, tuple[str, ...]]:
             normalized_lines.append(line)
     if not image_paths:
         return None, ()
-    return "".join(normalized_lines).strip(), tuple(image_paths)
+    return _normalize_multimodal_text("".join(normalized_lines)), tuple(
+        image_paths
+    )
 
 
 def _user_texts(raw: dict) -> tuple[str, ...]:
@@ -138,7 +155,8 @@ class PromptEchoMatcher:
         if image_count != len(self._image_paths):
             return False
         if not any(
-            self._image_text in _IMAGE_MARKER_RE.sub("", text)
+            self._image_text
+            in _normalize_multimodal_text(_IMAGE_MARKER_RE.sub("", text))
             for text in texts
         ):
             return False

@@ -259,6 +259,38 @@ class TestPromptEcho:
         ) is False
         assert matcher.observe(_image_source_echo(image_path)) is True
 
+    def test_image_echo_matches_when_claude_removes_blank_lines(self):
+        """Image user records collapse blank lines in the text block."""
+
+        r = JsonlReader("/nonexistent")
+        image_path = "/srv/ccm/uploads/screen.png"
+        prompt = (
+            "<ccm_task_artifact_policy>\n"
+            "规则一\n"
+            "</ccm_task_artifact_policy>\n\n"
+            "数学排版提示：使用有效 LaTeX。\n\n"
+            "请用 Read 工具查看以下文件：\n"
+            f"- {image_path}\n"
+            "\n"
+            "任务：检查截图"
+        )
+        matcher = r.prompt_echo_matcher(prompt)
+
+        # Claude keeps the image marker and text but omits empty lines when
+        # serializing a multimodal user message. The source companion record
+        # still carries the exact path and must complete the match.
+        assert matcher.observe(
+            _user_image_echo(
+                "[Image #1]<ccm_task_artifact_policy>\n"
+                "规则一\n"
+                "</ccm_task_artifact_policy>\n"
+                "数学排版提示：使用有效 LaTeX。\n"
+                "请用 Read 工具查看以下文件：\n-\n"
+                "任务：检查截图"
+            )
+        ) is False
+        assert matcher.observe(_image_source_echo(image_path)) is True
+
     def test_multiple_image_sources_must_match_in_prompt_order(self):
         r = JsonlReader("/nonexistent")
         first = "/srv/ccm/uploads/first image.png"
