@@ -1,5 +1,14 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-09-02 Claude 隐式异步 Agent 被启动回执提前标记完成
+
+- **现象**：Claude 原生 Agent 已在后台运行，CCM 也创建了 Sub-Agent 行，但立即显示 `completed`，`checks_done=0`、`last_summary=NULL`，展开面板没有进度或结果。
+- **根因**：新版 Claude CLI 可以在 Agent 工具输入未声明 `run_in_background` 时自主选择异步执行，并在顶层 `toolUseResult` 返回 `isAsync=true/status=async_launched/agentId`。PTY tracker 只相信原始工具输入，把启动确认的 `tool_result` 当成了同步终态。
+- **解决**（commit `2d6e5b1`）：`JsonlReader` 将结构化 `toolUseResult` 传入 `SubagentTracker`；tracker 以结构化异步状态为权威依据，按 `agentId` 保持 pending，只有匹配的 `<task-notification>` 才产生带 summary 的 done。同步 Agent 原行为不变。
+- **教训**：工具请求参数只表达调用方意图，不一定是 provider 的实际调度结果。生命周期必须优先消费结构化执行回执，不能从英文提示文本或请求 flag 推测终态。
+
+---
+
 ## 2026-08-19 活跃回合注入 ACK 缺失时误杀健康 Claude
 
 - **现象**：CCM 已把完整的 bracketed-paste + Enter 写入活跃 Claude，但 `queue-operation` ACK 在 15 秒内没有出现；PTY 为防重复执行立即 SIGTERM，导致仍在正常工作的 Task 以 `exit_code=143` 异常结束。
