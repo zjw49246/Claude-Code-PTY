@@ -100,12 +100,20 @@ class SubagentTracker:
 
     # ------------------------------------------------------------ completions
 
-    def note_tool_result(self, tool_use_id: str | None, output: str) -> dict | None:
+    def note_tool_result(
+        self,
+        tool_use_id: str | None,
+        output: str,
+        tool_use_result: dict | None = None,
+    ) -> dict | None:
         """Record a tool_result; returns done info when it closes a sub-agent.
 
         Agent/Task results close the sub-agent. A Monitor result only confirms
         arming — it carries the harness task id used to correlate later
-        notifications — so the monitor stays pending.
+        notifications — so the monitor stays pending. Claude may also launch
+        an Agent asynchronously without echoing ``run_in_background`` in the
+        original tool input; the structured ``toolUseResult`` is authoritative
+        for that case.
         """
         if not tool_use_id or tool_use_id not in self.pending:
             return None
@@ -118,13 +126,31 @@ class SubagentTracker:
                 self._monitor_tasks[m.group(1)] = tool_use_id
             return None
 
-        # Background Agent: tool_result is just "Async agent launched",
-        # not completion. Keep pending like Monitor; real completion
-        # arrives via <task-notification>.
-        if info.get("background"):
-            m = _AGENT_ID_RE.search(output or "")
-            if m:
-                agent_id = m.group(1)
+        structured_async = bool(
+            isinstance(tool_use_result, dict)
+            and (
+                tool_use_result.get("isAsync") is True
+                or tool_use_result.get("status") == "async_launched"
+            )
+        )
+
+        # Background Agent: tool_result is only launch acknowledgement, not
+        # completion. Prefer Claude's structured result because current CLI
+        # versions can choose async execution even when the tool input omitted
+        # run_in_background. Keep pending like Monitor; real completion arrives
+        # via <task-notification>.
+        if info.get("background") or structured_async:
+            info["background"] = True
+            agent_id = None
+            if isinstance(tool_use_result, dict):
+                candidate = tool_use_result.get("agentId")
+                if isinstance(candidate, str) and candidate:
+                    agent_id = candidate
+            if agent_id is None:
+                m = _AGENT_ID_RE.search(output or "")
+                if m:
+                    agent_id = m.group(1)
+            if agent_id:
                 info["harness_task_id"] = agent_id
                 self._monitor_tasks[agent_id] = tool_use_id
             return None

@@ -26,7 +26,7 @@ JsonlReader ──→ PTYEvent 流（与 CCM StreamParser 对齐）
 
 - **输入**：默认经 BridgeHub → channel_server 注入（MCP notification），可唤起 idle 会话开新 turn；stdin（bracketed-paste）仅作 fallback。注入返回 200 ≠ CC 真的消费了——`inject_confirm_timeout`（默认 15s）内 JSONL 无活动则 stdin 重投一次。
 - **活跃回合追加**：`steer_active_turn` 只有在匹配的 `queue-operation` ACK 后返回 `True`。stdin 已完整写入但 ACK 超时时抛出 `SteerDeliveryUncertainError`，调用方不得自动重试；Session 会冻结本回合的后续 steer，但让 Claude 完成正在执行的工作。
-- **输出**：轮询 session 对应的 JSONL transcript，normalize 成 `PTYEvent`。普通 prompt 用完整 user 回显对齐；图片路径被转换为 image block 时，还会核对规范化文本与精确 source path，避免把回答丢成 orphan。回合结束以 `system/turn_duration` 哨兵判定（交互模式每 turn 恰一条）；`isApiErrorMessage: true` 表示 turn 被 API 错误掐断，立即以错误事件收尾。
+- **输出**：轮询 session 对应的 JSONL transcript，normalize 成 `PTYEvent`。普通 prompt 用完整 user 回显对齐；图片路径被转换为 image block 时，还会核对规范化文本与精确 source path，避免把回答丢成 orphan。原生 Agent 即使未在工具输入声明后台运行，只要 Claude 的结构化结果确认 `async_launched`，也会保持 pending 并持续产生进度/完成事件。回合结束以 `system/turn_duration` 哨兵判定（交互模式每 turn 恰一条）；`isApiErrorMessage: true` 表示 turn 被 API 错误掐断，立即以错误事件收尾。
 - **注入隔离**：inject 端口由 OS 分配；注入负载带目标 session_id，不匹配回 409——防同机多宿主串话。
 - **启动免对话框**：spawn 前预写 `.claude.json` 的 trust 条目和 `hasCompletedOnboarding/theme`，drain loop 兜底自动应答 `Enter to confirm` 类提示。
 - **启动事务清理**：会话池在独立 task 中保护 `Session.start`。调用方在 spawn→pool 注册窗口取消，或 start 在 spawn 后报错时，pool 会先等待启动收敛并停止未发布 Session，再把原异常交还调用方，不会遗留无人跟踪的 Claude 进程。

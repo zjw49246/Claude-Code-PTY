@@ -288,7 +288,16 @@ class JsonlReader:
 
         if msg_type == "user":
             return self._normalize_user(
-                message, raw_json, now, session_id, include_user_text
+                message,
+                raw_json,
+                now,
+                session_id,
+                include_user_text,
+                tool_use_result=(
+                    raw.get("toolUseResult")
+                    if isinstance(raw.get("toolUseResult"), dict)
+                    else None
+                ),
             )
 
         return []
@@ -438,6 +447,7 @@ class JsonlReader:
         now: str,
         session_id: str | None,
         include_user_text: bool = False,
+        tool_use_result: dict | None = None,
     ) -> list[PTYEvent]:
         msg_content = message.get("content", [])
         if isinstance(msg_content, str):
@@ -487,7 +497,9 @@ class JsonlReader:
             )
             if self.tracker is not None:
                 done = self.tracker.note_tool_result(
-                    block.get("tool_use_id"), tool_output or ""
+                    block.get("tool_use_id"),
+                    tool_output or "",
+                    tool_use_result,
                 )
                 if done:
                     events.append(

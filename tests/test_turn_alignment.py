@@ -96,8 +96,8 @@ def _agent_tool_use(tool_use_id="toolu_1", name="Agent", **input_extra):
     }
 
 
-def _tool_result(tool_use_id="toolu_1", text="done"):
-    return {
+def _tool_result(tool_use_id="toolu_1", text="done", *, tool_use_result=None):
+    raw = {
         "type": "user",
         "message": {
             "role": "user",
@@ -110,6 +110,9 @@ def _tool_result(tool_use_id="toolu_1", text="done"):
             ],
         },
     }
+    if tool_use_result is not None:
+        raw["toolUseResult"] = tool_use_result
+    return raw
 
 
 # --------------------------------------------------------------- tracker
@@ -369,6 +372,48 @@ class TestReaderSubagentEvents:
         types = [e.event_type for e in events]
         assert EventType.TOOL_RESULT in types
         assert EventType.SUBAGENT_DONE in types
+
+    def test_structured_async_agent_result_stays_pending_until_notification(self):
+        tracker = SubagentTracker()
+        r = JsonlReader("/nonexistent", tracker=tracker)
+        r.normalize(_agent_tool_use())
+
+        launch_events = r.normalize(
+            _tool_result(
+                text="Async agent launched successfully.",
+                tool_use_result={
+                    "isAsync": True,
+                    "status": "async_launched",
+                    "agentId": "agent-async-1",
+                },
+            )
+        )
+
+        assert [event.event_type for event in launch_events] == [
+            EventType.TOOL_RESULT
+        ]
+        assert tracker.has_pending is True
+        assert tracker.pending["toolu_1"]["background"] is True
+        assert tracker.pending["toolu_1"]["harness_task_id"] == "agent-async-1"
+
+        completion_events = r.normalize(
+            _user_text(
+                "<task-notification>\n"
+                "<task-id>agent-async-1</task-id>\n"
+                "<status>completed</status>\n"
+                "<summary>Found the exact save bug.</summary>\n"
+                "</task-notification>"
+            ),
+            include_user_text=True,
+        )
+
+        done = next(
+            event
+            for event in completion_events
+            if event.event_type == EventType.SUBAGENT_DONE
+        )
+        assert done.subagent["summary"] == "Found the exact save bug."
+        assert tracker.has_pending is False
 
     def test_user_text_only_in_autonomous_mode(self):
         r = JsonlReader("/nonexistent")
