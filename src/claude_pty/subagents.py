@@ -199,6 +199,35 @@ class SubagentTracker:
 
         return {"event": "progress", **dict(info), "summary": summary_text or text[:2000]}
 
+    def reconcile_terminal_tool_uses(
+        self, tool_use_ids: set[str] | list[str] | tuple[str, ...]
+    ) -> list[dict]:
+        """Drop pending children already proven terminal by the host.
+
+        Claude can persist a background Agent completion in its queue journal
+        without ever delivering the corresponding ``<task-notification>`` as
+        a normal user record.  A host which has an independent durable
+        lifecycle mirror can therefore prove that a child is complete even
+        though this in-memory tracker has not observed the notification.  The
+        host supplies the exact tool-use ids it has proven terminal; unrelated
+        pending children remain fail-closed.
+        """
+
+        completed: list[dict] = []
+        for tool_use_id in tuple(tool_use_ids):
+            if not isinstance(tool_use_id, str) or not tool_use_id:
+                continue
+            info = self.pending.pop(tool_use_id, None)
+            if info is None:
+                continue
+            for task_id, mapped_tool_use_id in tuple(self._monitor_tasks.items()):
+                if mapped_tool_use_id == tool_use_id:
+                    self._monitor_tasks.pop(task_id, None)
+            done = dict(info)
+            done["reconciled"] = True
+            completed.append(done)
+        return completed
+
     # ----------------------------------------------------------------- extras
 
     def _lookup_meta(self, tool_use_id: str) -> dict:

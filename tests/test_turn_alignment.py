@@ -135,6 +135,55 @@ class TestSubagentTracker:
         assert done["kind"] == "native-agent"
         assert not t.has_pending
 
+    def test_reconcile_terminal_tool_uses_removes_only_proven_children(self):
+        t = SubagentTracker()
+        t.note_tool_use(
+            {
+                "id": "toolu_done",
+                "name": "Agent",
+                "input": {"description": "finished"},
+            }
+        )
+        t.note_tool_use(
+            {
+                "id": "toolu_live",
+                "name": "Agent",
+                "input": {"description": "still running"},
+            }
+        )
+
+        # A host-side durable mirror may prove one exact child terminal even
+        # when no normal task-notification reached the PTY reader.  Unknown
+        # ids and unrelated live children must remain fail-closed.
+        reconciled = t.reconcile_terminal_tool_uses(
+            {"toolu_done", "toolu_unknown"}
+        )
+
+        assert [item["tool_use_id"] for item in reconciled] == ["toolu_done"]
+        assert reconciled[0]["reconciled"] is True
+        assert set(t.pending) == {"toolu_live"}
+
+    def test_reconcile_terminal_monitor_clears_harness_mapping(self):
+        t = SubagentTracker()
+        t.note_tool_use(
+            {
+                "id": "toolu_monitor",
+                "name": "Monitor",
+                "input": {"description": "watch"},
+            }
+        )
+        t.note_tool_result(
+            "toolu_monitor",
+            "Monitor started (task harness-123, timeout 1000ms)",
+        )
+
+        assert t._monitor_tasks == {"harness-123": "toolu_monitor"}
+        reconciled = t.reconcile_terminal_tool_uses({"toolu_monitor"})
+
+        assert len(reconciled) == 1
+        assert not t.pending
+        assert not t._monitor_tasks
+
     def test_non_agent_tool_ignored(self):
         t = SubagentTracker()
         assert t.note_tool_use({"id": "x", "name": "Bash", "input": {}}) is None
