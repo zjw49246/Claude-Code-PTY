@@ -1,5 +1,14 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-09-04 queue journal 独占完成通知导致 native Agent 永久 pending
+
+- **现象**：CCM Task 501 的 native Agent 已由独立持久化 watcher 标记 `completed`，但 PTY `SubagentTracker` 仍保持 pending；主回复结束后 Task 因此长期显示“后台仍在运行”。
+- **根因**：Claude 只把该 Agent 的完成通知写进 `queue-operation` journal 的 `content`，没有生成普通 `<task-notification>` user 记录。JSONL reader 为避免把队列控制记录误当消息而跳过全部 `queue-operation`，tracker 因而缺少终态事件。
+- **解决**（commit `da9de45`）：为 tracker 增加 host-proof reconciliation API，只按宿主已持久证明终态的精确 `tool_use_id` 清理 pending 和 Monitor 映射；其他子 Agent 保持 fail closed。
+- **教训**：provider 内存 tracker 与宿主持久生命周期镜像可能因日志投影差异短暂分叉。补偿路径必须绑定不可复用的精确 identity，不能因“全部看起来结束”而整体清空 tracker。
+
+---
+
 ## 2026-09-02 Claude 隐式异步 Agent 被启动回执提前标记完成
 
 - **现象**：Claude 原生 Agent 已在后台运行，CCM 也创建了 Sub-Agent 行，但立即显示 `completed`，`checks_done=0`、`last_summary=NULL`，展开面板没有进度或结果。
