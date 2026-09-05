@@ -722,6 +722,25 @@ class Session:
                 "falling back to PTY stdin",
                 self.session_id, self._INJECT_ATTEMPTS,
             )
+            if self._process and self._process.startup_dialog_on_screen():
+                # The channel server never came up AND CC's latest render is
+                # still a startup dialog: CC never reached the chat UI. A
+                # blind paste would land in the dialog (arrow/enter semantics)
+                # — it once selected the exit option and killed CC (CCM task
+                # 752). No prompt has been delivered; fail before any
+                # provider-visible effect instead.
+                tail = self._process.recent_output_tail[-600:]
+                logger.error(
+                    "Session %s: refusing stdin fallback — startup dialog "
+                    "still on screen; last PTY output (collapsed): %r",
+                    self.session_id, tail,
+                )
+                raise SessionError(
+                    f"Session {self.session_id}: channel server never became "
+                    "reachable and Claude is still on a startup dialog; "
+                    "prompt was NOT delivered (safe to retry after fixing "
+                    "startup)"
+                )
 
         logger.info(
             "Session %s: sending prompt via PTY stdin (%d chars)",

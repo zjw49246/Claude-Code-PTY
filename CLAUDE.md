@@ -14,7 +14,7 @@
 - **原生子 Agent**：`Agent`/`Task` 的同步结果直接收口；若 Claude 在原始工具输入未声明 `run_in_background` 时仍返回结构化 `toolUseResult.isAsync/status=async_launched`，必须按真实 `agentId` 保持 pending，直到匹配的 `<task-notification>` 才完成
 - **回合归属**：普通 prompt 以完整 user 回显确认；本地图片路径被 CC 转成 image block 时，必须同时匹配规范化文本和后续精确 `[Image: source: path]` 序列，才允许该 turn 的输出/哨兵解除 orphan 隔离
 - **回合结束**：`system/turn_duration` JSONL 哨兵（交互模式每 turn 恰一条，在所有消息之后；没有 result 事件）。例外：`isApiErrorMessage: true` 的 assistant 消息表示 turn 被 API 错误掐断，之后不会再有哨兵——立即以错误事件结束 turn
-- **启动对话框**：spawn 前预写 `.claude.json` trust 条目 + 顶层 `hasCompletedOnboarding/theme`（首次交互模式会弹 theme picker，-p 模式从不弹）（主）+ drain loop 通用 `Entertoconfirm` 自动应答（兜底，剥 ANSI + 折叠空白匹配）
+- **启动对话框**：spawn 前预写 `.claude.json` trust 条目 + 顶层 `hasCompletedOnboarding/theme`（首次交互模式会弹 theme picker，-p 模式从不弹）（主）+ drain loop 通用 `Entertoconfirm` 自动应答（兜底，剥 ANSI + 折叠空白匹配）。预写路径必须用 `_env.claude_json_path`（与 `build_clean_env` 共用 CLAUDE_CONFIG_DIR 判定）：默认 `~/.claude` 时 CC 读 `$HOME/.claude.json`，写 `~/.claude/.claude.json` 等于没写（task 752 事故）。channel 全部拒连且屏幕仍停在启动对话框时禁止 stdin 盲降级，抛 pre-delivery `SessionError`
 - **撞限检测**：JSONL 结构化 `rate_limit_event` 立即可信；PTY 横幅扫描**单独不可信**（标记会出现在 TUI 渲染的对话正文里——tool result 引用本仓库源码即误中）：turn 已有 JSONL 活动 → 判误报清 flag 继续；turn 零 JSONL 输出再静默 `rate_limit_confirm_quiet`（默认 15s）才确认；turn 正常完成时清残留 flag 防毒化下一 turn
 - **PTY 职责**：进程保活、Esc 中断、启动应答、输出活动信号（`_last_output`）
 - **启动事务边界**（`pool.py`）：`SessionPool.get_or_create` 在独立 task 中 shield `Session.start`；若调用方取消或 start 在 spawn 后报错，必须先等待 start 事务收敛、再 shield `Session.stop`，确认未发布进程清理完成后才释放 pool 锁并重抛，禁止留下 pool 外的 Claude 进程

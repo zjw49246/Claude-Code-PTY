@@ -19,7 +19,7 @@ from typing import Callable
 import logging
 
 from .config import PTYConfig
-from ._env import build_clean_env
+from ._env import build_clean_env, claude_json_path as _claude_json_path_for
 from .exceptions import PTYSpawnError, PTYDeadError
 
 logger = logging.getLogger(__name__)
@@ -132,6 +132,10 @@ class PTYProcess:
         # without this lock a live-turn steer or interrupt can split that pair.
         self._input_lock = threading.Lock()
         self._last_output: float = 0.0  # monotonic ts of last PTY output
+        # Always-on rolling tail of collapsed PTY output. Primary evidence for
+        # post-mortems (which screen CC was on when it died) and for refusing
+        # a blind stdin fallback onto a wedged startup dialog.
+        self._recent_tail: str = ""
         self.rate_limited: bool = False  # set by drain loop on limit banner
         self._running = False
         self._child_dead = threading.Event()
@@ -150,6 +154,23 @@ class PTYProcess:
     @property
     def channels_enabled(self) -> bool:
         return self._channel_inject_port is not None
+
+    @property
+    def recent_output_tail(self) -> str:
+        """Rolling tail of collapsed PTY output (diagnostic snapshot)."""
+        return self._recent_tail
+
+    def startup_dialog_on_screen(self) -> bool:
+        """Whether CC's most recent render still looks like a startup dialog.
+
+        Only the end of the rolling tail counts: an answered dialog is followed
+        by chat-UI output, so its marker no longer sits at the tail edge. Used
+        to refuse a blind stdin fallback into a wedged trust/login dialog,
+        where pasted prompt text becomes dialog input (CCM task 752 killed CC
+        that way).
+        """
+        tail = self._recent_tail[-400:]
+        return any(m in tail for m in _CONFIRM_MARKERS)
 
     def clear_rate_limited(self) -> None:
         """Reset the banner flag after the host judged it a false positive
@@ -244,12 +265,12 @@ class PTYProcess:
         the auto-confirm fallback still covers us.
         """
         if claude_json_path is None:
-            if self.config.config_dir:
-                claude_json_path = os.path.join(
-                    self.config.config_dir, ".claude.json"
-                )
-            else:
-                claude_json_path = os.path.expanduser("~/.claude.json")
+            # Must target the file CC will actually read (same CLAUDE_CONFIG_DIR
+            # decision as build_clean_env). With the default ~/.claude dir CC
+            # reads ~/.claude.json in $HOME; writing the trust entry into
+            # ~/.claude/.claude.json instead brings the trust/MCP dialogs back
+            # and wedges headless startup (CCM task 752).
+            claude_json_path = _claude_json_path_for(self.config)
 
         try:
             cfg: dict = {}
@@ -401,6 +422,7 @@ class PTYProcess:
                     logger.debug("drain[%s]: %d bytes", self.session_id[:8], len(data))
                     self._last_output = now
                     collapsed = _collapse_for_prompt_match(data)
+                    self._recent_tail = (self._recent_tail + collapsed)[-2000:]
                     if now < confirm_deadline:
                         confirm_buf = (confirm_buf + collapsed)[-2000:]
                     if not self.rate_limited:
@@ -430,6 +452,13 @@ class PTYProcess:
                 self._child_dead.set()
                 break
 
+        if self._child_dead.is_set() and self._recent_tail:
+            # Post-mortem evidence: the last screen content CC rendered.
+            logger.warning(
+                "drain[%s]: child died; last PTY output (collapsed): %r",
+                self.session_id[:8],
+                self._recent_tail[-600:],
+            )
         if self._on_death and self._child_dead.is_set():
             try:
                 self._on_death(self)

@@ -1,5 +1,14 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-09-05 pretrust 写错 .claude.json，默认账号新项目 PTY 启动被信任对话框卡死
+
+- **现象**：CCM Task 752（默认账号 `~/.claude`，全新项目 cwd）PTY 启动后 pty-bridge channel server 始终拒连（15 次 inject 全部 Connection refused），30 秒后盲降级 stdin 粘贴 prompt，Claude 0.5 秒内 exit_code=1；CCM 判定“已越过外部效应边界”并 fail closed。
+- **根因**：`_pretrust_workdir` 只要 `config_dir` 非空就写 `<config_dir>/.claude.json`，而 `build_clean_env` 对等于默认 `~/.claude` 的 config_dir **不导出** `CLAUDE_CONFIG_DIR`——此时 CC 实际读取 `$HOME/.claude.json`。trust 条目与 pty-bridge MCP 预批准全部写进了 CC 不读的文件，新项目首启必弹 trust/MCP 对话框；对话框状态下 MCP 不加载，channel server 永远起不来；随后的盲 stdin 粘贴落在对话框上把 CC 直接打死。
+- **解决**：新增 `_env.claude_json_path(config)` 与 `build_clean_env` 共用同一 CLAUDE_CONFIG_DIR 判定（含 realpath 归一与 env_overrides 覆盖），pretrust 一律写 CC 实际读取的文件；drain loop 维护常开 `_recent_tail` 并在子进程死亡时输出最后屏幕内容；channel 全部拒连且 `startup_dialog_on_screen()`（tail 末端仍是启动对话框）时拒绝 stdin 降级、抛 `SessionError`，此时 prompt 从未送达，属可安全重试的 pre-delivery 失败。
+- **教训**：预写配置的路径决策必须与 spawn env 的路径决策共用同一段代码，两处各自 if/else 就是错库事故的温床。盲降级通道前必须先证明接收端处于能正确解释输入的状态，否则“送达成功”本身就是副作用事故。
+
+---
+
 ## 2026-09-04 queue journal 独占完成通知导致 native Agent 永久 pending
 
 - **现象**：CCM Task 501 的 native Agent 已由独立持久化 watcher 标记 `completed`，但 PTY `SubagentTracker` 仍保持 pending；主回复结束后 Task 因此长期显示“后台仍在运行”。

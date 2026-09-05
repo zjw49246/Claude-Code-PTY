@@ -139,6 +139,71 @@ class TestPretrustWorkdir:
         assert json.loads(claude_json.read_text())["projects"]["/w"][
             "hasTrustDialogAccepted"] is True
 
+    def test_default_config_dir_writes_home_claude_json(
+        self, tmp_path, monkeypatch
+    ):
+        # config_dir == default ~/.claude: build_clean_env does NOT export
+        # CLAUDE_CONFIG_DIR, so CC reads $HOME/.claude.json. Pretrust must
+        # write that file — writing ~/.claude/.claude.json pre-trusts a file
+        # CC never opens, the trust/MCP dialogs come back, the channel MCP
+        # server never starts, and the turn dies (CCM task 752).
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        from claude_pty.config import PTYConfig
+
+        proc = PTYProcess(
+            cwd="/w",
+            session_id="sid-1",
+            config=PTYConfig(config_dir=str(home / ".claude")),
+            channel_inject_port=19999,
+        )
+        proc._pretrust_workdir()
+
+        assert not (home / ".claude" / ".claude.json").exists()
+        entry = json.loads((home / ".claude.json").read_text())["projects"]["/w"]
+        assert entry["hasTrustDialogAccepted"] is True
+        assert "pty-bridge" in entry["enabledMcpjsonServers"]
+
+    def test_custom_config_dir_writes_its_own_claude_json(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        account = tmp_path / "pool" / "account-2"
+        account.mkdir(parents=True)
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        from claude_pty.config import PTYConfig
+
+        proc = PTYProcess(
+            cwd="/w",
+            session_id="sid-1",
+            config=PTYConfig(config_dir=str(account)),
+        )
+        proc._pretrust_workdir()
+
+        assert not (home / ".claude.json").exists()
+        entry = json.loads((account / ".claude.json").read_text())["projects"]["/w"]
+        assert entry["hasTrustDialogAccepted"] is True
+
+
+class TestStartupDialogOnScreen:
+    def test_dialog_at_tail_edge_detected(self):
+        proc = PTYProcess(cwd="/w", session_id="sid-1")
+        proc._recent_tail = "Doyoutrustthefilesinthisfolder?1.Yes,proceedEntertoconfirm·Esctoexit"
+        assert proc.startup_dialog_on_screen() is True
+
+    def test_answered_dialog_followed_by_chat_ui_not_detected(self):
+        proc = PTYProcess(cwd="/w", session_id="sid-1")
+        proc._recent_tail = (
+            "Entertoconfirm" + "WelcometoClaudeCode!" + "x" * 400
+        )
+        assert proc.startup_dialog_on_screen() is False
+
+    def test_empty_tail_not_detected(self):
+        proc = PTYProcess(cwd="/w", session_id="sid-1")
+        assert proc.startup_dialog_on_screen() is False
+
 
 class TestEnterToConfirmMatching:
     """CC renders TUI with cursor-positioning, so visible spaces vanish.
@@ -173,11 +238,17 @@ class TestDeliverPrompt:
         class FakeProc:
             session_id = "sid-1"
             sent: list = []
+            recent_output_tail = ""
+            dialog_on_screen = False
 
             def send_prompt(self, text):
                 FakeProc.sent.append(text)
 
+            def startup_dialog_on_screen(self):
+                return FakeProc.dialog_on_screen
+
         FakeProc.sent = []
+        FakeProc.dialog_on_screen = False
         session._process = FakeProc()
         return session, session._process
 
@@ -212,6 +283,36 @@ class TestDeliverPrompt:
 
     async def test_stdin_direct_without_channels(self):
         session, proc = self._make_session(None, None)
+        await session._deliver_prompt("hi")
+        assert proc.sent == ["hi"]
+
+    async def test_wedged_startup_dialog_blocks_stdin_fallback(self):
+        # Channel server never reachable AND a startup dialog is still the
+        # latest render: CC never reached the chat UI. A blind paste would
+        # land in the dialog (it once selected the exit option and killed
+        # CC — CCM task 752). The prompt must NOT be delivered.
+        import pytest
+        from claude_pty.exceptions import SessionError
+
+        class FailingBridge:
+            def inject(self, sid, content, meta=None):
+                return False
+
+        session, proc = self._make_session(FailingBridge(), 19999)
+        session._INJECT_RETRY_INTERVAL = 0.01
+        type(proc).dialog_on_screen = True
+        type(proc).recent_output_tail = (
+            "Doyoutrustthefilesinthisfolder?Entertoconfirm"
+        )
+        with pytest.raises(SessionError):
+            await session._deliver_prompt("hello")
+        assert proc.sent == []  # nothing reached CC
+
+    async def test_dialog_without_channel_failure_still_uses_stdin(self):
+        # No channel configured at all: the dialog guard must not apply —
+        # stdin is the only path and legacy behavior stays intact.
+        session, proc = self._make_session(None, None)
+        type(proc).dialog_on_screen = True
         await session._deliver_prompt("hi")
         assert proc.sent == ["hi"]
 
