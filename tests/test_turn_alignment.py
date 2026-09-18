@@ -66,6 +66,18 @@ def _turn_duration():
     return {"type": "system", "subtype": "turn_duration", "durationMs": 1}
 
 
+def _request_interrupted():
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "[Request interrupted by user]"}
+            ],
+        },
+    }
+
+
 def _queue_operation(operation, content=None):
     event = {"type": "queue-operation", "operation": operation}
     if content is not None:
@@ -505,6 +517,7 @@ def _make_session(tmp_path, config=None) -> Session:
         rate_limited = False
         sent: list = []
         stop_count = 0
+        interrupt_count = 0
 
         def send_prompt(self, text):
             FakeProc.sent.append(text)
@@ -513,9 +526,13 @@ def _make_session(tmp_path, config=None) -> Session:
             FakeProc.stop_count += 1
             FakeProc.is_alive = False
 
+        def send_interrupt(self):
+            FakeProc.interrupt_count += 1
+
     FakeProc.sent = []
     FakeProc.is_alive = True
     FakeProc.stop_count = 0
+    FakeProc.interrupt_count = 0
     session._process = FakeProc()
     session._tracker.set_jsonl_path(str(jsonl))
     session._reader = JsonlReader(str(jsonl), tracker=session._tracker)
@@ -609,6 +626,135 @@ class TestTurnAlignment:
         # the in-flight tail is orphan-flagged
         assert any(
             e.orphan and "旧" in (e.content or "") for e in events
+        )
+
+    async def test_matching_queue_remove_starts_turn_without_user_echo(
+        self, tmp_path
+    ):
+        """Claude may fold stdin into an active turn and emit no user echo."""
+
+        session = _make_session(tmp_path)
+        prompt = "继续当前证明"
+
+        async def cc_responds():
+            await asyncio.sleep(0.05)
+            _append(
+                session,
+                _queue_operation("enqueue", prompt),
+                _assistant_text("自动恢复回合的旧输出"),
+                _turn_duration(),
+                _queue_operation("remove", prompt),
+                _assistant_text("当前问题的完整回答"),
+                _turn_duration(),
+            )
+
+        writer = asyncio.create_task(cc_responds())
+        events = [e async for e in session.send_prompt(prompt)]
+        await writer
+
+        assert any(
+            event.orphan and event.content == "自动恢复回合的旧输出"
+            for event in events
+        )
+        assert any(
+            not event.orphan and event.content == "当前问题的完整回答"
+            for event in events
+        )
+        assert not any(
+            event.event_type == EventType.SYSTEM_EVENT and event.is_error
+            for event in events
+        )
+
+    async def test_unrelated_queue_remove_does_not_start_turn(self, tmp_path):
+        session = _make_session(tmp_path)
+        prompt = "当前问题"
+
+        async def cc_responds():
+            await asyncio.sleep(0.05)
+            _append(
+                session,
+                _queue_operation("remove", "子 agent 通知"),
+                _assistant_text("仍是旧回合"),
+                _turn_duration(),
+                _user_text(prompt),
+                _assistant_text("才是当前回答"),
+                _turn_duration(),
+            )
+
+        writer = asyncio.create_task(cc_responds())
+        events = [e async for e in session.send_prompt(prompt)]
+        await writer
+
+        assert any(
+            event.orphan and event.content == "仍是旧回合"
+            for event in events
+        )
+        assert any(
+            not event.orphan and event.content == "才是当前回答"
+            for event in events
+        )
+
+    async def test_explicit_interrupt_record_completes_without_duration(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+
+        async def cc_responds():
+            await asyncio.sleep(0.05)
+            _append(
+                session,
+                _user_text("中止异常回合"),
+                _assistant_text("异常输出"),
+            )
+            while session._active_turn_process is None:
+                await asyncio.sleep(0.01)
+            while session._process.interrupt_count == 0:
+                await asyncio.sleep(0.01)
+            _append(session, _request_interrupted())
+
+        writer = asyncio.create_task(cc_responds())
+
+        async def collect_events():
+            return [
+                event
+                async for event in session.send_prompt(
+                    "中止异常回合", timeout=1.0
+                )
+            ]
+
+        collector = asyncio.create_task(collect_events())
+        while session._active_turn_process is None:
+            await asyncio.sleep(0.01)
+        await session.send_interrupt()
+        events = await asyncio.wait_for(collector, timeout=0.5)
+        await writer
+
+        assert not any(
+            event.event_type == EventType.SYSTEM_EVENT and event.is_error
+            for event in events
+        )
+
+    async def test_interrupt_text_without_explicit_interrupt_is_not_terminal(
+        self, tmp_path
+    ):
+        session = _make_session(tmp_path)
+
+        async def cc_responds():
+            await asyncio.sleep(0.05)
+            _append(
+                session,
+                _user_text("继续运行"),
+                _request_interrupted(),
+                _assistant_text("仍然继续到正常终态"),
+                _turn_duration(),
+            )
+
+        writer = asyncio.create_task(cc_responds())
+        events = [e async for e in session.send_prompt("继续运行")]
+        await writer
+
+        assert any(
+            event.content == "仍然继续到正常终态" for event in events
         )
 
     async def test_clean_turn_unchanged(self, tmp_path):

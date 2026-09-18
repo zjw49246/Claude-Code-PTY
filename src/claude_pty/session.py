@@ -76,6 +76,10 @@ class Session:
         self._turn_state_lock = asyncio.Lock()
         self._active_turn_owner: object | None = None
         self._active_turn_process: PTYProcess | None = None
+        # Claude can acknowledge an explicit interrupt with a synthetic user
+        # row but omit the usual turn_duration sentinel. Fence that terminal
+        # marker to the exact process/foreground turn that we interrupted.
+        self._interrupted_turn_process: PTYProcess | None = None
         self._pending_steer: _PendingSteer | None = None
         # A queued stdin steer may cross the original turn boundary. Keep the
         # exact process fenced until JSONL proves that the update was absorbed
@@ -220,8 +224,13 @@ class Session:
         return status not in {"allowed", "allowed_warning"}
 
     @staticmethod
-    def _queue_operation_matches_prompt(raw: dict, prompt: str) -> bool:
-        """Return whether an enqueue record can be attributed to ``prompt``.
+    def _queue_operation_matches_prompt(
+        raw: dict,
+        prompt: str,
+        *,
+        operation: str = "enqueue",
+    ) -> bool:
+        """Return whether a queue record can be attributed to ``prompt``.
 
         Queue-operation records are also emitted for native child
         notifications.  Treating any such record as confirmation of a
@@ -233,7 +242,7 @@ class Session:
 
         if (
             raw.get("type") != "queue-operation"
-            or raw.get("operation") != "enqueue"
+            or raw.get("operation") != operation
         ):
             return False
         content = raw.get("content")
@@ -254,6 +263,19 @@ class Session:
             return False
         wrapped = candidate[opening_end + 1 : closing_start].strip()
         return wrapped == needle
+
+    @staticmethod
+    def _is_interrupt_terminal(raw: dict) -> bool:
+        """Match only Claude's exact synthetic interrupted-turn record."""
+
+        if raw.get("type") != "user":
+            return False
+        message = raw.get("message")
+        if not isinstance(message, dict) or message.get("role") != "user":
+            return False
+        return message.get("content") == [
+            {"type": "text", "text": "[Request interrupted by user]"}
+        ]
 
     async def start(self, initial_prompt: str | None = None) -> None:
         loop = asyncio.get_running_loop()
@@ -845,14 +867,21 @@ class Session:
                 rate_limit_in_batch = False
                 enqueued_pending_in_batch: _PendingSteer | None = None
                 uncertain_terminal_in_batch: _PendingSteer | None = None
-                prompt_echo_ids: set[int] = set()
+                turn_start_ids: set[int] = set()
                 for raw in messages:
                     if (
                         not scan_started
-                        and prompt_echo_matcher.observe(raw)
+                        and (
+                            prompt_echo_matcher.observe(raw)
+                            or self._queue_operation_matches_prompt(
+                                raw,
+                                text,
+                                operation="remove",
+                            )
+                        )
                     ):
                         scan_started = True
-                        prompt_echo_ids.add(id(raw))
+                        turn_start_ids.add(id(raw))
 
                     pending = self._pending_steer
                     if pending is not None:
@@ -912,8 +941,16 @@ class Session:
 
                     if (
                         scan_started
-                        and self._reader.is_response_complete(raw)
+                        and (
+                            self._reader.is_response_complete(raw)
+                            or (
+                                self._interrupted_turn_process is turn_process
+                                and self._is_interrupt_terminal(raw)
+                            )
+                        )
                     ):
+                        if self._interrupted_turn_process is turn_process:
+                            self._interrupted_turn_process = None
                         if self._pending_steer is not None:
                             terminal_deferred = True
                             self._active_turn_process = None
@@ -1034,7 +1071,7 @@ class Session:
                 if raw.get("isApiErrorMessage"):
                     api_error_turn = True
                 if not turn_started:
-                    if id(raw) in prompt_echo_ids:
+                    if id(raw) in turn_start_ids:
                         turn_started = True
                         confirm_deadline = None  # delivery confirmed
                         if not (
@@ -1224,9 +1261,12 @@ class Session:
     async def send_interrupt(self) -> None:
         async with self._turn_state_lock:
             turn_owner = self._active_turn_owner
+            process = self._active_turn_process
+            if turn_owner is not None and process is not None:
+                self._interrupted_turn_process = process
         if turn_owner is not None:
             await self._deactivate_active_turn(turn_owner)
-        process = self._process
+        process = process or self._process
         if process and process.is_alive:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, process.send_interrupt)
