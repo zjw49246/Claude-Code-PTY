@@ -6,6 +6,8 @@
 uv run pytest -q tests/test_pool.py tests/test_pool_reaper.py
 ```
 
+`tests/test_phase1.py::TestDeliverPrompt` 必须覆盖 channel 建连预算耗尽后只在首轮重试、后续 turn 直接使用 stdin，以及启动对话框仍保持 fail-closed 且不缓存 channel 失败。`TestInjectDeliveryConfirm` 必须覆盖 HTTP 200 但 JSONL 未确认时执行一次 stdin fallback 并禁用该 session 的后续 channel 投递。
+
 `tests/test_pool.py` 必须覆盖 `Session.start` 在进程 spawn 后报错和调用方取消两条路径：未发布 Session 要先完成 shielded stop，才允许 `get_or_create` 重抛；重复取消也不能中断清理。
 
 `tests/test_turn_alignment.py` 必须覆盖活跃 turn steer 的三种不确定边界：ACK 超时不终止仍在工作的 Claude 且禁止同 turn 重投、迟到 ACK 仍由原消费者接管，以及消费者丢失时仍回收精确进程。图片 prompt 还必须覆盖 CC 将本地路径转换为 image block + source 记录、同文不同图不串回合，以及多图 source 顺序校验。原生 Agent 生命周期还必须覆盖“工具输入未声明后台、但结构化 `toolUseResult` 返回 `isAsync=true/status=async_launched`”的真实事件：启动回执不能生成 done，只有匹配 `agentId` 的 completion notification 才能携带 summary 收口。

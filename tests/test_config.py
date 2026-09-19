@@ -15,6 +15,8 @@ class TestPTYConfig:
         assert c.post_response_wait == 3.0
         assert c.response_timeout == 7200.0
         assert c.jsonl_poll_interval == 0.3
+        assert c.inject_connect_timeout == 28.0
+        assert c.inject_retry_interval == 2.0
         assert c.max_sessions == 20
         assert c.idle_timeout == 300.0
         assert c.max_restart_attempts == 3

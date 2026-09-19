@@ -32,6 +32,12 @@ class PTYConfig:
     # notification reached the channel server). If no JSONL activity appears
     # within this window, the prompt is re-sent via PTY stdin.
     inject_confirm_timeout: float = 15.0
+    # Bound how long a session waits for the local channel server to become
+    # reachable before using PTY stdin. The legacy 15 attempts at 2-second
+    # intervals consumed about 28 seconds; these defaults preserve that
+    # behavior unless a host explicitly chooses a shorter budget.
+    inject_connect_timeout: float = 28.0
+    inject_retry_interval: float = 2.0
     # PTY banner scan can match rate-limit phrases rendered from conversation
     # content (tool results quoting this repo's source, sessions discussing
     # limits — CCM task 81/82 false-freeze incident). A banner on a turn with

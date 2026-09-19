@@ -276,10 +276,16 @@ class TestDeliverPrompt:
 
         FailingBridge.calls = 0
         session, proc = self._make_session(FailingBridge(), 19999)
-        session._INJECT_RETRY_INTERVAL = 0.01
+        session.config.inject_connect_timeout = 0.03
+        session.config.inject_retry_interval = 0.01
         await session._deliver_prompt("hello")
-        assert FailingBridge.calls == session._INJECT_ATTEMPTS
+        assert FailingBridge.calls >= 2
         assert proc.sent == ["hello"]
+
+        calls_after_first_failure = FailingBridge.calls
+        await session._deliver_prompt("again")
+        assert FailingBridge.calls == calls_after_first_failure
+        assert proc.sent == ["hello", "again"]
 
     async def test_stdin_direct_without_channels(self):
         session, proc = self._make_session(None, None)
@@ -299,7 +305,8 @@ class TestDeliverPrompt:
                 return False
 
         session, proc = self._make_session(FailingBridge(), 19999)
-        session._INJECT_RETRY_INTERVAL = 0.01
+        session.config.inject_connect_timeout = 0.03
+        session.config.inject_retry_interval = 0.01
         type(proc).dialog_on_screen = True
         type(proc).recent_output_tail = (
             "Doyoutrustthefilesinthisfolder?Entertoconfirm"
@@ -307,6 +314,7 @@ class TestDeliverPrompt:
         with pytest.raises(SessionError):
             await session._deliver_prompt("hello")
         assert proc.sent == []  # nothing reached CC
+        assert session._channel_inject_unavailable is False
 
     async def test_dialog_without_channel_failure_still_uses_stdin(self):
         # No channel configured at all: the dialog guard must not apply —
@@ -877,6 +885,7 @@ class TestInjectDeliveryConfirm:
             events.append(ev)
 
         assert stdin_calls == ["hello"]
+        assert session._channel_inject_unavailable is True
         assert not any(ev.is_error for ev in events)
 
     async def test_no_fallback_when_turn_starts(self):

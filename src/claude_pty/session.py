@@ -96,6 +96,10 @@ class Session:
         self._prefetched_messages: list[dict] = []
         self._bridge = bridge
         self._channel_inject_port = channel_inject_port
+        # Once this session proves that channel delivery cannot reach Claude,
+        # later turns go straight to stdin instead of paying the same retry or
+        # confirmation budget again.
+        self._channel_inject_unavailable = False
         # True when session_id refers to an existing CC session on disk:
         # spawn with --resume instead of --session-id (which would collide).
         self._resume_existing = resume_existing
@@ -694,11 +698,6 @@ class Session:
                     "retried automatically"
                 )
 
-    # Channel server boots with CC's MCP startup; retry injection briefly
-    # before falling back to PTY stdin.
-    _INJECT_ATTEMPTS = 15
-    _INJECT_RETRY_INTERVAL = 2.0
-
     async def _deliver_prompt(self, text: str) -> str:
         """Deliver a prompt to CC: channel injection first, stdin fallback.
 
@@ -726,8 +725,18 @@ class Session:
             await loop.run_in_executor(None, self._process.send_prompt, text)
             return "stdin"
 
-        if self._bridge and self._channel_inject_port:
-            for attempt in range(1, self._INJECT_ATTEMPTS + 1):
+        if (
+            self._bridge
+            and self._channel_inject_port
+            and not self._channel_inject_unavailable
+        ):
+            started_at = loop.time()
+            deadline = started_at + max(
+                0.0, self.config.inject_connect_timeout
+            )
+            attempts = 0
+            while True:
+                attempts += 1
                 ok = await loop.run_in_executor(
                     None, self._bridge.inject, self.session_id, text, None
                 )
@@ -737,12 +746,17 @@ class Session:
                         self.session_id, len(text),
                     )
                     return "channel"
-                if attempt < self._INJECT_ATTEMPTS:
-                    await asyncio.sleep(self._INJECT_RETRY_INTERVAL)
+                remaining = deadline - loop.time()
+                retry_interval = max(0.0, self.config.inject_retry_interval)
+                if remaining <= 0 or retry_interval <= 0:
+                    break
+                await asyncio.sleep(min(retry_interval, remaining))
             logger.warning(
-                "Session %s: channel inject failed %d times, "
+                "Session %s: channel inject failed %d times over %.1fs, "
                 "falling back to PTY stdin",
-                self.session_id, self._INJECT_ATTEMPTS,
+                self.session_id,
+                attempts,
+                loop.time() - started_at,
             )
             if self._process and self._process.startup_dialog_on_screen():
                 # The channel server never came up AND CC's latest render is
@@ -763,6 +777,15 @@ class Session:
                     "prompt was NOT delivered (safe to retry after fixing "
                     "startup)"
                 )
+            self._channel_inject_unavailable = True
+
+        elif self._channel_inject_unavailable:
+            logger.info(
+                "Session %s: channel previously unavailable; using PTY "
+                "stdin directly (%d chars)",
+                self.session_id,
+                len(text),
+            )
 
         logger.info(
             "Session %s: sending prompt via PTY stdin (%d chars)",
@@ -1134,6 +1157,7 @@ class Session:
                 and time.monotonic() > confirm_deadline
             ):
                 confirm_deadline = None  # fall back at most once
+                self._channel_inject_unavailable = True
                 logger.warning(
                     "Session %s: no JSONL activity %.0fs after channel "
                     "inject, re-sending prompt via PTY stdin",

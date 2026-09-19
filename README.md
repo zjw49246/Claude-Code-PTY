@@ -100,7 +100,8 @@ session = await pool.get_or_create(cwd="/path/to/project")
 | `config_dir` | None | 账号目录（`CLAUDE_CONFIG_DIR`），多账号切换用 |
 | `dangerously_skip_permissions` | True | 跳过权限确认 |
 | `response_timeout` | 1800s | 单 turn 超时 |
-| `inject_confirm_timeout` | 15s | 注入后无 JSONL 活动则 stdin 重投 |
+| `inject_connect_timeout` / `inject_retry_interval` | 28s / 2s | channel 不可达时的总等待预算与重试间隔；耗尽后该 session 直接使用 stdin |
+| `inject_confirm_timeout` | 15s | 注入后无 JSONL 活动则 stdin 重投，并让该 session 后续直接使用 stdin |
 | `rate_limit_confirm_quiet` | 15s | 横幅限流的静默确认窗口 |
 | `max_sessions` / `idle_timeout` | 20 / 300s | 池容量与空闲驱逐 |
 
