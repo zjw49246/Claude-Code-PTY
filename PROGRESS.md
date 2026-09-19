@@ -1,5 +1,14 @@
 # PROGRESS — 经验教训沉淀
 
+## 2026-09-19 channel 不可达导致每轮固定等待（commit cece157）
+
+- **现象**：CCM 已把 `inject_confirm_timeout` 调到 3 秒，但真实 follow-up 仍在 `channel inject failed 15 times` 后约 28 秒才走 stdin，同一热 session 每轮重复等待。
+- **根因**：`inject_confirm_timeout` 只约束 HTTP 200 后的 JSONL 消费确认；channel 建连失败仍由 `_INJECT_ATTEMPTS=15` 和 `_INJECT_RETRY_INTERVAL=2` 硬编码控制，且失败状态没有保存在 Session。
+- **解决**：新增 `inject_connect_timeout` 与 `inject_retry_interval`，以总预算限制建连；建连预算耗尽或注入未获 JSONL 确认后标记该 Session 的 channel 不可用，后续 turn 直接使用 stdin。启动对话框拒绝 fallback 时不缓存失败，保持可恢复与 fail-closed。
+- **教训**：投递链路的“建连”和“消费确认”是两个独立超时层；下游调短确认窗口不能消除上游重试预算，真实端到端日志必须同时核对两段耗时。
+
+---
+
 ## 2026-09-05 pretrust 写错 .claude.json，默认账号新项目 PTY 启动被信任对话框卡死
 
 - **现象**：CCM Task 752（默认账号 `~/.claude`，全新项目 cwd）PTY 启动后 pty-bridge channel server 始终拒连（15 次 inject 全部 Connection refused），30 秒后盲降级 stdin 粘贴 prompt，Claude 0.5 秒内 exit_code=1；CCM 判定“已越过外部效应边界”并 fail closed。
